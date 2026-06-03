@@ -53,8 +53,28 @@ import { motion, AnimatePresence } from 'motion/react';
 
 import { Customer, CRMSettings, CustomerStatus } from './types';
 import { initialCustomers, defaultSettings, calculateAge, determineCustomerStatus } from './data';
+import { User } from 'firebase/auth';
+import {
+  initAuth,
+  googleSignIn,
+  logout,
+  createNewCrmSpreadsheet,
+  syncCustomersToSheets,
+  importCustomersFromSheets,
+  sendGmailMessage,
+  createGmailDraft,
+  listDriveSpreadsheets,
+  backupDbToDrive
+} from './workspace';
 
 export default function App() {
+  // --- Google Workspace Auth & Integration State ---
+  const [googleUser, setGoogleUser] = useState<User | null>(null);
+  const [googleToken, setGoogleToken] = useState<string | null>(null);
+  const [driveSpreadsheets, setDriveSpreadsheets] = useState<Array<{ id: string; name: string }>>([]);
+  const [isWorkspaceLoading, setIsWorkspaceLoading] = useState(false);
+  const [backupUrl, setBackupUrl] = useState<string | null>(null);
+
   // --- Persistent Core State ---
   const [customers, setCustomers] = useState<Customer[]>(() => {
     const saved = localStorage.getItem('tvb_customers');
@@ -156,6 +176,280 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem('tvb_settings', JSON.stringify(settings));
   }, [settings]);
+
+  // --- Google Workspace Auth Handlers and Scans ---
+  useEffect(() => {
+    const unsubscribe = initAuth(
+      (user, token) => {
+        setGoogleUser(user);
+        setGoogleToken(token);
+        // Refresh templates list
+        listDriveSpreadsheets().then(files => {
+          setDriveSpreadsheets(files);
+        }).catch(err => console.log('Spreadsheet list reload error:', err));
+      },
+      () => {
+        setGoogleUser(null);
+        setGoogleToken(null);
+        setDriveSpreadsheets([]);
+      }
+    );
+    return () => unsubscribe();
+  }, []);
+
+  const handleWorkspaceLogin = async () => {
+    setIsWorkspaceLoading(true);
+    try {
+      const result = await googleSignIn();
+      if (result) {
+        setGoogleUser(result.user);
+        setGoogleToken(result.accessToken);
+        triggerToast("🔑 Connected to Google Workspace successfully!");
+        const files = await listDriveSpreadsheets();
+        setDriveSpreadsheets(files);
+      }
+    } catch (err: any) {
+      console.error('Workspace login failure:', err);
+      triggerToast(`❌ Google connection failed: ${err.message || 'Unknown error'}`);
+    } finally {
+      setIsWorkspaceLoading(false);
+    }
+  };
+
+  const handleWorkspaceLogout = async () => {
+    setIsWorkspaceLoading(true);
+    try {
+      await logout();
+      setGoogleUser(null);
+      setGoogleToken(null);
+      setDriveSpreadsheets([]);
+      setBackupUrl(null);
+      triggerToast("🔒 Disconnected Google Workspace account.");
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setIsWorkspaceLoading(false);
+    }
+  };
+
+  const triggerGoogleSheetsExport = async () => {
+    if (!googleUser || !googleToken) {
+      triggerToast('⚠️ Connect Google Workspace account first under Settings tab.');
+      return;
+    }
+    const targetSheetId = settings.googleSheetsId;
+    if (!targetSheetId) {
+      triggerToast('⚠️ Please specify a target spreadsheet ID or Create New in Settings.');
+      return;
+    }
+
+    const confirmed = window.confirm(`Transmit local patron database (${customers.length} records) to Google Sheets? This will overwrite the target spreadsheet.`);
+    if (!confirmed) return;
+
+    setIsSyncing(true);
+    const timestamp = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    try {
+      await syncCustomersToSheets(targetSheetId, settings.googleSheetsName || 'Customer Directory', customers);
+      setSyncLogs(prev => [
+        { timestamp, action: `Export Succeeded: Synthesized ${customers.length} rows to Sheet ID: ${targetSheetId.substring(0, 10)}...`, type: 'success' },
+        ...prev
+      ]);
+      triggerToast('🟢 Perfectly exported patron directory to Google Sheets!');
+    } catch (err: any) {
+      console.error(err);
+      setSyncLogs(prev => [
+        { timestamp, action: `Export Error: ${err.message || 'Transmission failed'}`, type: 'warn' },
+        ...prev
+      ]);
+      triggerToast(`❌ Sheets Export failed: ${err.message || 'Request was rejected'}`);
+    } finally {
+      setIsSyncing(false);
+    }
+  };
+
+  const triggerGoogleSheetsImport = async () => {
+    if (!googleUser || !googleToken) {
+      triggerToast('⚠️ Connect Google Workspace account first under Settings tab.');
+      return;
+    }
+    const targetSheetId = settings.googleSheetsId;
+    if (!targetSheetId) {
+      triggerToast('⚠️ Please specify target Google Sheets ID under Settings tab first.');
+      return;
+    }
+
+    const confirmed = window.confirm(`Load and merge patrons from Google Sheets? This will update local CRM state.`);
+    if (!confirmed) return;
+
+    setIsSyncing(true);
+    const timestamp = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    try {
+      const sheetsCustomers = await importCustomersFromSheets(targetSheetId, settings.googleSheetsName || 'Customer Directory');
+      if (sheetsCustomers.length > 0) {
+        setCustomers(sheetsCustomers);
+        setSyncLogs(prev => [
+          { timestamp, action: `Import Succeeded: Received ${sheetsCustomers.length} formatted data rows from Sheet ID [${targetSheetId.substring(0,6)}...]`, type: 'success' },
+          ...prev
+        ]);
+        triggerToast(`🟢 Successfully synchronized ${sheetsCustomers.length} rows from Google Sheets!`);
+      } else {
+        triggerToast('⚠️ No customer rows discovered in the specified spreadsheet.');
+      }
+    } catch (err: any) {
+      console.error(err);
+      setSyncLogs(prev => [
+        { timestamp, action: `Import Error: ${err.message || 'Failed to read sheet cells'}`, type: 'warn' },
+        ...prev
+      ]);
+      triggerToast(`❌ Sheets Import failed: ${err.message || 'Check range and range name'}`);
+    } finally {
+      setIsSyncing(false);
+    }
+  };
+
+  const handleCreateAutoSheet = async () => {
+    if (!googleUser || !googleToken) {
+      triggerToast('⚠️ Connect Google Workspace Account first under Settings/Handshake Panel.');
+      return;
+    }
+    setIsSyncing(true);
+    const timestamp = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    try {
+      const { id, url } = await createNewCrmSpreadsheet();
+      setSettings(prev => ({ ...prev, googleSheetsId: id, googleSheetsName: 'Customer Directory' }));
+      
+      setSyncLogs(prev => [
+        { timestamp, action: `Auto-Create: Created Velvet Box spreadsheet in Drive. ID: ${id.substring(0, 10)}...`, type: 'success' },
+        ...prev
+      ]);
+      triggerToast('🟢 Created Velvet Box CRM spreadsheet beautifully in Drive!');
+
+      // Populate sheet right away with current database
+      await syncCustomersToSheets(id, 'Customer Directory', customers);
+      setSyncLogs(prev => [
+        { timestamp, action: `Auto-Sync: Synced ${customers.length} patron profiles automatically`, type: 'success' },
+        ...prev
+      ]);
+      const files = await listDriveSpreadsheets();
+      setDriveSpreadsheets(files);
+    } catch (err: any) {
+      console.error(err);
+      triggerToast(`❌ Auto-Create spreadsheet failed: ${err.message}`);
+    } finally {
+      setIsSyncing(false);
+    }
+  };
+
+  const triggerGoogleDriveBackup = async () => {
+    if (!googleUser || !googleToken) {
+      triggerToast('⚠️ Google Account Workspace connection required.');
+      return;
+    }
+    setIsSyncing(true);
+    const timestamp = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    try {
+      const dbPayload = JSON.stringify({
+        date: new Date().toISOString(),
+        customers,
+        settings
+      }, null, 2);
+      
+      const fileName = `TheVelvetBox_CRM_Backup_${new Date().toISOString().split('T')[0]}.json`;
+      const result = await backupDbToDrive(dbPayload, fileName);
+      setBackupUrl(result.url);
+      setSyncLogs(prev => [
+        { timestamp, action: `Drive Backup: Deposited secure database JSON archive inside Google Drive`, type: 'success' },
+        ...prev
+      ]);
+      triggerToast('🟢 Entire local Velvet Box CRM database backed up successfully to Google Drive!');
+    } catch (err: any) {
+      console.error(err);
+      triggerToast(`❌ Drive Backup failed: ${err.message}`);
+    } finally {
+      setIsSyncing(false);
+    }
+  };
+
+  const handleSendGmailAPI = async (customer: Customer, textMsg: string, isDraft: boolean = false) => {
+    if (!googleUser || !googleToken) {
+      triggerToast('⚠️ Google Workspace account must be connected in Settings first.');
+      return;
+    }
+    const timestamp = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+    const verb = isDraft ? "Create luxury email draft for" : "Transmit real email to";
+    const confirmed = window.confirm(`Confirm: ${verb} ${customer.name} (${customer.email}) using the Gmail API?`);
+    if (!confirmed) return;
+
+    if (isDraft) {
+      triggerToast('✉️ Formatting & saving draft to Gmail...');
+    } else {
+      triggerToast('✉️ Transmitting premium message via Gmail API...');
+    }
+
+    try {
+      const emailHtml = `
+        <div style="font-family: 'Inter', sans-serif; color: #301934; line-height: 1.6; max-width: 600px; margin: 0 auto; border: 1px solid #e1d5e5; padding: 32px; border-radius: 12px; background-color: #ffffff; box-shadow: 0 4px 12px rgba(48,25,52,0.05);">
+          <div style="text-align: center; border-bottom: 2px solid #D4AF37; padding-bottom: 20px; margin-bottom: 24px;">
+            <h1 style="color: #301934; margin: 0; font-family: 'Playfair Display', serif; font-size: 28px; letter-spacing: 2px; font-weight: 500;">
+              THE VELVET BOX
+            </h1>
+            <p style="font-size: 11px; text-transform: uppercase; letter-spacing: 3px; color: #B76E79; margin: 6px 0 0 0; font-weight: bold;">
+              Premium Fine Jewellery & Silver Patron Lounge
+            </p>
+          </div>
+          
+          <div style="font-size: 14px; text-align: left; color: #4A4A4A; space-y: 12px;">
+            ${textMsg.split('\n').map(p => p.trim() ? `<p style="margin-bottom: 14px;">${p}</p>` : '').join('')}
+          </div>
+
+          <div style="margin-top: 32px; border-top: 1px dashed #e1d5e5; padding-top: 20px; font-size: 11px; color: #9A9A9A; text-align: center;">
+            <p style="font-weight: bold; margin-bottom: 4px; color: #301934;">Elegant Rings &bull; Handcrafted Earrings &bull; Delicate Bracelets</p>
+            <p style="margin: 0;">This email is an exclusive client relations message sent privately on behalf of 
+              <a href="https://velvetboxs.com/" style="color: #B76E79; text-decoration: none; font-weight: bold;">The Velvet Box</a>.
+            </p>
+          </div>
+        </div>
+      `;
+
+      if (isDraft) {
+        const draftId = await createGmailDraft(
+          customer.email,
+          `Exclusive Proposal for ${customer.name} - The Velvet Box`,
+          textMsg,
+          emailHtml
+        );
+        setSendSuccessMessage(`Draft Recorded successfully! Ready inside your Gmail Drafts folder (Draft ID: ${draftId})`);
+        setSyncLogs(prev => [
+          { timestamp, action: `Draft Saved: Created custom Gmail draft for ${customer.name}`, type: 'success' },
+          ...prev
+        ]);
+        triggerToast('✉️ Custom Gmail Draft Created!');
+      } else {
+        const msgId = await sendGmailMessage(
+          customer.email,
+          `Exclusive Proposal for ${customer.name} - The Velvet Box`,
+          textMsg,
+          emailHtml
+        );
+        setSendSuccessMessage(`Message sent successfully! Gmail Broadcast ID: ${msgId}`);
+        setSyncLogs(prev => [
+          { timestamp, action: `Gmail Sent: Dispatched high-fidelity layout to ${customer.name} (Msg ID: ${msgId})`, type: 'success' },
+          ...prev
+        ]);
+        triggerToast('✉️ Gmail Broadcast Dispatched!');
+      }
+    } catch (err: any) {
+      console.error(err);
+      setSendSuccessMessage(`Gmail integration error: ${err.message || 'API request rejected'}`);
+      setSyncLogs(prev => [
+        { timestamp, action: `Gmail API Error sending to ${customer.name}: ${err.message || 'Unknown integration error'}`, type: 'warn' },
+        ...prev
+      ]);
+      triggerToast('⚠️ Gmail API Transmission Failed!');
+    }
+    setTimeout(() => setSendSuccessMessage(null), 8000);
+  };
 
   useEffect(() => {
     setQueueSelectionState(prev => {
@@ -682,17 +976,7 @@ export default function App() {
 
   // --- Google Sheets Manual Synchronization Trigger ---
   const triggerGoogleSheetsSync = () => {
-    setIsSyncing(true);
-    const timestamp = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-    
-    setTimeout(() => {
-      setIsSyncing(false);
-      setSyncLogs(prev => [
-        { timestamp, action: `Full sync committed: Transmitted ${customers.length} rows to Google Sheet ${settings.googleSheetsId}`, type: 'success' },
-        ...prev
-      ]);
-      triggerToast('🟢 Google Sheets CRM successfully synchronized with 0 conflicts!');
-    }, 1500);
+    triggerGoogleSheetsExport();
   };
 
   // --- Save Backend Gemini API Key ---
@@ -2264,11 +2548,34 @@ export default function App() {
                             </button>
                             <button 
                               onClick={() => handleSendEmailSMTP(selectedCustomer, generatedDraft)}
-                              className="bg-[#B76E79] text-white hover:bg-[#c9808a] font-bold text-[10px] p-2 rounded px-4 flex items-center gap-1.5 cursor-pointer transition-all font-semibold hover:scale-[1.02]"
+                              className="bg-slate-100 hover:bg-slate-200 text-slate-800 border border-slate-300 font-bold text-[10px] p-2 rounded px-4 flex items-center gap-1.5 cursor-pointer transition-all hover:scale-[1.02]"
                             >
-                              <Mail className="w-3.5 h-3.5" />
-                              <span>SMTP SECURE BROADCAST</span>
+                              <Mail className="w-3.5 h-3.5 text-slate-500" />
+                              <span>SMTP CLIENT BROADCAST</span>
                             </button>
+
+                            {googleUser && (
+                              <>
+                                <button 
+                                  onClick={() => handleSendGmailAPI(selectedCustomer, generatedDraft, false)}
+                                  className="bg-[#301934] text-white hover:bg-[#4a2650] font-bold text-[10px] p-2 rounded px-4 flex items-center gap-1.5 cursor-pointer border border-[#D4AF37]/30 transition-all font-semibold hover:scale-[1.02]"
+                                >
+                                  <svg className="w-3.5 h-3.5 text-[#D4AF37]" viewBox="0 0 24 24" fill="currentColor">
+                                    <path d="M20 4H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 4l-8 5-8-5V6l8 5 8-5v2z"/>
+                                  </svg>
+                                  <span>GMAIL SEND API</span>
+                                </button>
+                                <button 
+                                  onClick={() => handleSendGmailAPI(selectedCustomer, generatedDraft, true)}
+                                  className="bg-amber-100 text-amber-950 hover:bg-amber-200 border border-amber-300 font-bold text-[10px] p-2 rounded px-4 flex items-center gap-1.5 cursor-pointer transition-all hover:scale-[1.02]"
+                                >
+                                  <svg className="w-3.5 h-3.5 text-amber-700" viewBox="0 0 24 24" fill="currentColor">
+                                    <path d="M20.41 8.41l-4.83-4.83c-.37-.37-.88-.58-1.41-.58H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V9.83c0-.53-.21-1.04-.59-1.42zM5 20V4h9v5h5v11H5z"/>
+                                  </svg>
+                                  <span>CREATE GMAIL DRAFT</span>
+                                </button>
+                              </>
+                            )}
                           </>
                         )}
                       </div>
@@ -2984,15 +3291,97 @@ export default function App() {
 
               </div>
 
-              {/* Right Column: Google Sheets Integration options */}
-              <div className="col-span-4 bg-white border border-slate-200 rounded-xl p-4 flex flex-col justify-between overflow-auto">
+              {/* Right Column: Google Workspace Integration Options */}
+              <div className="col-span-4 bg-white border border-slate-200 rounded-xl p-4 flex flex-col justify-between overflow-auto space-y-4">
+                
+                {/* Handshaking Header */}
                 <div className="space-y-4">
                   <div className="flex items-center gap-1.5 border-b border-slate-50 pb-2">
                     <Database className="w-4 h-4 text-[#D4AF37]" />
-                    <span className="text-[11px] font-black text-[#301934] uppercase tracking-wide font-sans">Google Sheets Sync Parameters</span>
+                    <span className="text-[11px] font-black text-[#301934] uppercase tracking-wide font-sans">Google Workspace Connect Portal</span>
                   </div>
 
-                  <div className="p-3 bg-amber-50/10 border border-[#D4AF37]/30 rounded-lg space-y-3">
+                  {/* Auth Connection Status Block */}
+                  {!googleUser ? (
+                    <div className="p-4 bg-slate-50 border border-slate-200/80 rounded-xl text-center space-y-2.5">
+                      <p className="text-xxs font-semibold uppercase text-slate-400 tracking-wide">Google Identity Verification</p>
+                      <p className="text-xs text-slate-500 leading-relaxed">
+                        Connect your account to send direct <strong>Gmail marketing drafts</strong>, <strong>read/write Google Sheets</strong>, and backup database records to <strong>Google Drive</strong>.
+                      </p>
+                      <div className="flex justify-center pt-1">
+                        <button 
+                          onClick={handleWorkspaceLogin}
+                          disabled={isWorkspaceLoading}
+                          className="relative inline-flex items-center justify-center gap-2 bg-white hover:bg-slate-50 text-slate-700 border border-slate-300 font-bold p-2 px-5 rounded-lg text-xs shadow-sm cursor-pointer transition-colors"
+                        >
+                          <svg className="w-4 h-4" viewBox="0 0 24 24">
+                            <path fill="#EA4335" d="M12 5.04c1.65 0 3.14.57 4.31 1.69L19.92 3.1C17.78 1.18 15.02 0 12 0 7.31 0 3.25 2.69 1.28 6.61l3.99 3.09C6.21 6.86 8.87 5.04 12 5.04z" />
+                            <path fill="#4285F4" d="M23.49 12.27c0-.82-.07-1.61-.21-2.38H12v4.51h6.44c-.28 1.48-1.11 2.73-2.37 3.58l3.69 2.87c2.16-1.99 3.4-4.92 3.4-8.58z" />
+                            <path fill="#FBBC05" d="M5.27 14.3C5.03 13.57 4.9 12.8 4.9 12s.13-1.57.27-2.3l-3.99-3.09C.46 8.23 0 10.06 0 12s.46 3.77 1.18 5.39l4.09-3.09z" />
+                            <path fill="#34A853" d="M12 24c3.24 0 5.97-1.07 7.96-2.91l-3.69-2.87c-1.03.69-2.34 1.1-4.27 1.1-3.13 0-5.79-1.82-6.73-4.66l-4.09 3.09C3.25 21.31 7.31 24 12 24z" />
+                          </svg>
+                          <span>{isWorkspaceLoading ? "Initializing..." : "Connect Google Account"}</span>
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="p-3 bg-indigo-50/25 border border-indigo-100 rounded-xl space-y-2">
+                      <div className="flex items-center gap-2.5">
+                        {googleUser.photoURL ? (
+                          <img referrerPolicy="no-referrer" src={googleUser.photoURL} alt="Profile" className="w-8 h-8 rounded-full border border-indigo-200" />
+                        ) : (
+                          <div className="w-8 h-8 rounded-full bg-[#301934] text-[#D4AF37] flex items-center justify-center font-bold text-xs uppercase">
+                            {googleUser.displayName?.charAt(0) || googleUser.email?.charAt(0) || "G"}
+                          </div>
+                        )}
+                        <div className="text-left leading-tight">
+                          <p className="text-xs font-bold text-slate-800">{googleUser.displayName || 'Authorized Patron Link'}</p>
+                          <p className="text-[10px] text-slate-400 font-mono">{googleUser.email}</p>
+                        </div>
+                      </div>
+                      
+                      <div className="flex justify-between items-center text-[10px] font-semibold text-[#B76E79] bg-[#301934]/5 p-2 rounded">
+                        <span>Workspace Connection Status:</span>
+                        <span className="font-extrabold uppercase tracking-widest text-[#301934]">Connected</span>
+                      </div>
+
+                      <button
+                        onClick={handleWorkspaceLogout}
+                        className="w-full text-center text-[10px] text-red-600 hover:text-red-700 font-bold tracking-wider py-1 border border-red-200/50 hover:bg-red-50/30 rounded"
+                      >
+                        DISCONNECT GOOGLE ACCOUNT
+                      </button>
+                    </div>
+                  )}
+
+                  {/* Google Sheets Live Configuration */}
+                  <div className="p-3.5 bg-amber-50/10 border border-[#D4AF37]/30 rounded-lg space-y-3">
+                    <span className="text-[10px] uppercase font-bold text-slate-400 block text-left">spreadsheet parameters</span>
+
+                    {/* Drive Smart Scanning Option */}
+                    {googleUser && driveSpreadsheets.length > 0 && (
+                      <div className="space-y-1 text-left">
+                        <span className="text-[9px] uppercase font-bold text-slate-400 flex items-center gap-1">
+                          <span className="w-1.5 h-1.5 rounded-full bg-indigo-500 animate-pulse"></span>
+                          <span>Import spreadsheet from Google Drive</span>
+                        </span>
+                        <select 
+                          onChange={(e) => {
+                            if (e.target.value) {
+                              setSettings({ ...settings, googleSheetsId: e.target.value });
+                              triggerToast('📌 Associated target spreadsheet ID from your Drive!');
+                            }
+                          }}
+                          className="w-full text-xs font-bold font-mono border border-slate-200 rounded p-1 focus:outline-none bg-white text-slate-700 cursor-pointer"
+                        >
+                          <option value="">-- Choose file from Google Drive list --</option>
+                          {driveSpreadsheets.map(f => (
+                            <option key={f.id} value={f.id}>{f.name} (File ID: {f.id.substring(0,8)}...)</option>
+                          ))}
+                        </select>
+                      </div>
+                    )}
+
                     <div className="space-y-1 text-left">
                       <span className="text-[9px] uppercase font-bold text-slate-400">Spreadsheet ID URL Path</span>
                       <input 
@@ -3013,27 +3402,72 @@ export default function App() {
                       />
                     </div>
 
-                    <div className="flex items-center justify-between text-xxs font-semibold">
-                      <span className="text-slate-400">Dual Sync Enabled:</span>
-                      <span className="text-emerald-700 font-bold uppercase tracking-widest bg-emerald-50 p-1 rounded">Yes</span>
-                    </div>
+                    {googleUser && (
+                      <button 
+                        onClick={handleCreateAutoSheet}
+                        disabled={isSyncing}
+                        className="w-full bg-amber-50 hover:bg-amber-100 text-amber-950 text-xxs font-black p-1.5 rounded border border-amber-200/80 cursor-pointer text-center tracking-wide block"
+                      >
+                        ⚡ AUTO-GENERATE BRAND NEW GOOGLE SPREADSHEET
+                      </button>
+                    )}
                   </div>
 
+                  {/* Google Drive Backup Engine Panel */}
+                  {googleUser && (
+                    <div className="p-3 bg-slate-50 border border-slate-200 rounded-lg text-left space-y-2">
+                      <span className="text-[9px] uppercase font-bold text-slate-400 block">drive database vault backup</span>
+                      <div className="flex gap-2">
+                        <button 
+                          onClick={triggerGoogleDriveBackup}
+                          disabled={isSyncing}
+                          className="flex-1 bg-indigo-50 hover:bg-indigo-100 text-indigo-950 text-xxs font-bold p-2 border border-indigo-200/60 rounded flex items-center justify-center gap-1.5 cursor-pointer"
+                        >
+                          <Download className="w-3.5 h-3.5" />
+                          <span>Backup DB Archive</span>
+                        </button>
+                        
+                        {backupUrl && (
+                          <a 
+                            href={backupUrl}
+                            target="_blank" 
+                            rel="noreferrer"
+                            className="bg-[#301934] text-[#D4AF37] text-xxs font-bold p-2 px-3 border border-[#D4AF37]/30 rounded flex items-center gap-1 hover:bg-[#4a2650]"
+                          >
+                            <ExternalLink className="w-3.5 h-3.5" />
+                            <span>View Backup</span>
+                          </a>
+                        )}
+                      </div>
+                    </div>
+                  )}
+
                   <div className="text-xxs text-slate-400 leading-relaxed text-left bg-slate-50 p-3 rounded">
-                    💡 This app is designed to sync transactions, segment states, and birthday drafts automatically with the connected Google Sheets. Any additions to the Customer Master database will stream immediately to the configured ID grid.
+                    💡 <strong>Real-time API integrations:</strong> Changes made here reflect instantly across synchronized spreadsheets and Gmail drafts. Overwrite operations require your explicit authorization prompt window.
                   </div>
                 </div>
 
-                <div className="border-t border-slate-100 pt-4 mt-6">
+                {/* Master Synchronize Triggers */}
+                <div className="border-t border-slate-100 pt-4 grid grid-cols-2 gap-3">
                   <button 
-                    onClick={triggerGoogleSheetsSync}
-                    className="w-full bg-[#301934] text-[#D4AF37] border border-[#D4AF37]/30 hover:bg-[#301934]/95 py-2 rounded text-xs font-bold transition-colors cursor-pointer"
+                    onClick={triggerGoogleSheetsExport}
+                    disabled={isSyncing || !googleUser}
+                    className={`p-2 rounded text-xs font-bold transition-all flex items-center justify-center gap-1.5 cursor-pointer ${googleUser ? "bg-[#301934] text-[#D4AF37] border border-[#D4AF37]/30 hover:bg-[#301934]/95 shadow-sm" : "bg-slate-100 text-slate-400 border border-slate-200/50 cursor-not-allowed"}`}
                   >
-                    TEST SHEETS INTEGRATION
+                    <RefreshCw className={`w-3.5 h-3.5 ${isSyncing ? "animate-spin" : ""}`} />
+                    <span>EXPORT TO SHEETS</span>
+                  </button>
+
+                  <button 
+                    onClick={triggerGoogleSheetsImport}
+                    disabled={isSyncing || !googleUser}
+                    className={`p-2 rounded text-xs font-bold transition-all flex items-center justify-center gap-1.5 cursor-pointer ${googleUser ? "bg-amber-100 text-amber-950 border border-amber-300 hover:bg-amber-200 shadow-sm" : "bg-slate-100 text-slate-400 border border-slate-200/50 cursor-not-allowed"}`}
+                  >
+                    <FileSpreadsheet className="w-3.5 h-3.5" />
+                    <span>IMPORT FROM SHEETS</span>
                   </button>
                 </div>
               </div>
-
             </div>
           )}
 
@@ -3344,10 +3778,32 @@ export default function App() {
                   setIsPreviewEmailOpen(false);
                   handleSendEmailSMTP(selectedCustomer, generatedDraft);
                 }}
-                className="bg-[#B76E79] text-white hover:bg-[#ca828c] px-5 py-2 rounded text-xs font-black cursor-pointer shadow-xs"
+                className="bg-slate-100 text-slate-800 hover:bg-slate-200 px-4 py-2 rounded text-xs font-semibold border border-slate-200 cursor-pointer"
               >
-                SMTP DISPATCH EMAIL
+                SMTP CLIENT SEND
               </button>
+              {googleUser && (
+                <>
+                  <button 
+                    onClick={() => {
+                      setIsPreviewEmailOpen(false);
+                      handleSendGmailAPI(selectedCustomer, generatedDraft, true);
+                    }}
+                    className="bg-amber-100 text-amber-950 hover:bg-amber-200 px-4 py-2 rounded text-xs font-bold border border-amber-300 cursor-pointer"
+                  >
+                    SAVE GMAIL DRAFT
+                  </button>
+                  <button 
+                    onClick={() => {
+                      setIsPreviewEmailOpen(false);
+                      handleSendGmailAPI(selectedCustomer, generatedDraft, false);
+                    }}
+                    className="bg-[#301934] text-white hover:bg-[#4a2650] px-4 py-2 rounded text-xs font-black border border-[#D4AF37]/30 cursor-pointer"
+                  >
+                    GMAIL TRANSMIT API
+                  </button>
+                </>
+              )}
             </div>
 
           </div>
