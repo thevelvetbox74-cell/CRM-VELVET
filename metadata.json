@@ -1,0 +1,6 @@
+{
+  "name": "The Velvet Box CRM",
+  "description": "Customer Relationship Management and Customer Intelligence Platform for The Velvet Box premium silver jewellery.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
