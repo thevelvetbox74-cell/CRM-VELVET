@@ -51,6 +51,7 @@ export const initialCustomers: Customer[] = [
     clv: 13800,
     lastPurchaseDate: "2026-05-15",
     status: "Repeat Customer",
+    returnAmount: 450,
   },
   {
     id: "TVB-1002",
@@ -71,6 +72,7 @@ export const initialCustomers: Customer[] = [
     clv: 27500,
     lastPurchaseDate: "2026-05-28",
     status: "VIP Customer",
+    returnAmount: 1800,
   },
   {
     id: "TVB-1003",
@@ -91,11 +93,12 @@ export const initialCustomers: Customer[] = [
     clv: 2200,
     lastPurchaseDate: "2025-05-10",
     status: "New Customer",
+    returnAmount: 0,
   },
   {
     id: "TVB-1004",
     name: "Kavita Rao",
-    dob: "1997-09-18",
+    dob: "1997-06-04", // Birthday in 3 days from June 1, 2026!
     contactNumber: "+918877665544",
     whatsAppNumber: "+918877665544",
     email: "kavita.rao@example.com",
@@ -111,6 +114,7 @@ export const initialCustomers: Customer[] = [
     clv: 3700,
     lastPurchaseDate: "2026-03-12",
     status: "Returning Customer",
+    returnAmount: 500,
   },
   {
     id: "TVB-1005",
@@ -131,6 +135,7 @@ export const initialCustomers: Customer[] = [
     clv: 48000,
     lastPurchaseDate: "2026-05-02",
     status: "VIP Customer",
+    returnAmount: 0,
   }
 ];
 

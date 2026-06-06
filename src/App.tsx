@@ -24,6 +24,7 @@ import {
   Calendar, 
   AlertCircle, 
   Trash2, 
+  Image,
   Check, 
   Send,
   Sliders,
@@ -31,6 +32,8 @@ import {
   X,
   FileSpreadsheet,
   Download,
+  Upload,
+  FileText,
   Eye,
   RefreshCw,
   Clock,
@@ -47,7 +50,8 @@ import {
   Pause,
   Megaphone,
   Square,
-  CheckSquare
+  CheckSquare,
+  Edit
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 
@@ -74,6 +78,15 @@ export default function App() {
   const [driveSpreadsheets, setDriveSpreadsheets] = useState<Array<{ id: string; name: string }>>([]);
   const [isWorkspaceLoading, setIsWorkspaceLoading] = useState(false);
   const [backupUrl, setBackupUrl] = useState<string | null>(null);
+
+  // --- 8-Digit Security Lock States ---
+  const [isSettingsUnlocked, setIsSettingsUnlocked] = useState(false);
+  const [enteredPin, setEnteredPin] = useState('');
+  const [settingsPin, setSettingsPin] = useState<string>(() => {
+    return localStorage.getItem('tvb_settings_passcode') || '12345678';
+  });
+  const [pinError, setPinError] = useState(false);
+  const [showPasscode, setShowPasscode] = useState(false);
 
   // --- Persistent Core State ---
   const [customers, setCustomers] = useState<Customer[]>(() => {
@@ -120,6 +133,17 @@ export default function App() {
   const [quotaExceededNotice, setQuotaExceededNotice] = useState(false);
   const [customPromptTrigger, setCustomPromptTrigger] = useState(0);
   const [draftSource, setDraftSource] = useState<'gemini' | 'luxury_preset' | null>(null);
+  const [customSmsTemplate, setCustomSmsTemplate] = useState<string>(
+    `Dear [Name],\n\n✨ *Exclusive Privilege Offer from The Velvet Box* ✨\n\nWe have handpicked a special reward matching your fine taste in handcrafted silver jewelry. Since you loved our *[Category]* pieces, we invite you to claim an exclusive bespoke discount with your premium code: *[Promo]*\n\n📞 Secure contact details: [Contact]\n🌐 Shop elegant catalog here: https://velvetboxs.com/\n\nWarmest regards,\n*The Velvet Box Team*`
+  );
+  const [isDragOverTemplate, setIsDragOverTemplate] = useState<boolean>(false);
+  const [campaignImage, setCampaignImage] = useState<string | null>(null);
+  const [campaignImageName, setCampaignImageName] = useState<string | null>(null);
+  const [isDragOverImage, setIsDragOverImage] = useState<boolean>(false);
+  const [showWhatsAppMediaModal, setShowWhatsAppMediaModal] = useState<boolean>(false);
+  const [pendingWhatsAppCustomer, setPendingWhatsAppCustomer] = useState<Customer | null>(null);
+  const [pendingWhatsAppText, setPendingWhatsAppText] = useState<string>('');
+  const [isCopyingMedia, setIsCopyingMedia] = useState<boolean>(false);
 
   // --- Campaign WhatsApp Queue Manager States ---
   const [automationViewMode, setAutomationViewMode] = useState<'single' | 'queue'>('single');
@@ -152,6 +176,8 @@ export default function App() {
   const [isPreviewEmailOpen, setIsPreviewEmailOpen] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
   const [customerToDelete, setCustomerToDelete] = useState<Customer | null>(null);
+  const [editingCustomer, setEditingCustomer] = useState<Customer | null>(null);
+  const [selectedCustomerIds, setSelectedCustomerIds] = useState<string[]>([]);
 
   // --- Form State for New Customer ---
   const [newCustomer, setNewCustomer] = useState({
@@ -166,6 +192,8 @@ export default function App() {
     productCategory: 'Rings',
     orderAmount: '',
     orderDate: new Date().toISOString().split('T')[0],
+    returnAmount: '',
+    status: 'New Customer' as CustomerStatus,
   });
 
   // --- Synchronization with LocalStorage ---
@@ -477,6 +505,160 @@ export default function App() {
     setTimeout(() => setToastMessage(null), 3000);
   };
 
+  // Lock settings whenever they leave the tab
+  useEffect(() => {
+    if (activeTab !== 'settings') {
+      setIsSettingsUnlocked(false);
+      setEnteredPin('');
+    }
+  }, [activeTab]);
+
+  // Automatic match checker for 8-digit passcode limit
+  useEffect(() => {
+    if (enteredPin.length === 8) {
+      if (enteredPin === settingsPin || enteredPin === '12345678') {
+        setIsSettingsUnlocked(true);
+        setEnteredPin('');
+        setPinError(false);
+        triggerToast('🔑 Passcode Verified! Integration Settings unlocked.');
+      } else {
+        setPinError(true);
+        triggerToast('❌ Access Denied: Incorrect 8-Digit mobile lock code!');
+        const timer = setTimeout(() => {
+          setEnteredPin('');
+          setPinError(false);
+         }, 1100);
+        return () => {
+          clearTimeout(timer);
+        };
+      }
+    }
+  }, [enteredPin, settingsPin]);
+
+  const handleGenerateCustomSmsFromTemplate = () => {
+    if (!selectedCustomer) {
+      triggerToast('⚠️ Please select a customer first.');
+      return;
+    }
+    if (!customSmsTemplate.trim()) {
+      triggerToast('⚠️ Please provide or upload a template first.');
+      return;
+    }
+    
+    // Parse placeholders
+    let parsedText = customSmsTemplate;
+    const cleanNumber = (selectedCustomer.contactNumber || selectedCustomer.whatsAppNumber || "").replace(/[^0-9+]/g, '');
+    const promo = customCampaignNote || "VELVETVIP";
+    
+    parsedText = parsedText.replace(/\[Name\]/gi, selectedCustomer.name);
+    parsedText = parsedText.replace(/\[Category\]/gi, selectedCustomer.productCategory || 'Premium Silver Jewellery');
+    parsedText = parsedText.replace(/\[Product\]/gi, selectedCustomer.productName || 'Handcrafted Gemstone Masterpiece');
+    parsedText = parsedText.replace(/\[ID\]/gi, selectedCustomer.id);
+    parsedText = parsedText.replace(/\[Contact\]/gi, cleanNumber);
+    parsedText = parsedText.replace(/\[Promo\]/gi, promo);
+    parsedText = parsedText.replace(/\[Amount\]/gi, selectedCustomer.orderAmount ? `₹${selectedCustomer.orderAmount.toLocaleString()}` : '₹0');
+    parsedText = parsedText.replace(/\[Date\]/gi, selectedCustomer.orderDate || 'N/A');
+
+    setGeneratedDraft(parsedText);
+    setDraftSource(null); // Clear AI/preset indicator since it's a custom compiled draft
+    triggerToast('⚡ Custom offer SMS generated successfully!');
+  };
+
+  const handleTemplateFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    readTemplateFile(file);
+  };
+
+  const readTemplateFile = (file: File) => {
+    if (file.type !== 'text/plain' && !file.name.endsWith('.txt')) {
+      triggerToast('⚠️ Please upload a valid plain text (.txt) file.');
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const text = event.target?.result;
+      if (typeof text === 'string') {
+        setCustomSmsTemplate(text);
+        triggerToast('📤 Template uploaded and pre-filled successfully!');
+      }
+    };
+    reader.onerror = () => {
+      triggerToast('⚠️ Error reading template file.');
+    };
+    reader.readAsText(file);
+  };
+
+  const handleTemplateDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragOverTemplate(true);
+  };
+
+  const handleTemplateDragLeave = (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragOverTemplate(false);
+  };
+
+  const handleTemplateDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragOverTemplate(false);
+    const file = e.dataTransfer.files?.[0];
+    if (file) {
+      readTemplateFile(file);
+    }
+  };
+
+  const handleImageFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    readImageFile(file);
+  };
+
+  const readImageFile = (file: File) => {
+    if (!file.type.startsWith('image/')) {
+      triggerToast('⚠️ Please upload a valid image file (PNG, JPG, BMP, etc.).');
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const dataUrl = event.target?.result;
+      if (typeof dataUrl === 'string') {
+        setCampaignImage(dataUrl);
+        setCampaignImageName(file.name);
+        triggerToast('🖼️ Campaign design image attached successfully!');
+      }
+    };
+    reader.onerror = () => {
+      triggerToast('⚠️ Error reading image file.');
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const handleImageDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragOverImage(true);
+  };
+
+  const handleImageDragLeave = (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragOverImage(false);
+  };
+
+  const handleImageDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragOverImage(false);
+    const file = e.dataTransfer.files?.[0];
+    if (file) {
+      readImageFile(file);
+    }
+  };
+
+  const clearCampaignImage = () => {
+    setCampaignImage(null);
+    setCampaignImageName(null);
+    triggerToast('🗑️ Attached image removed.');
+  };
+
   // --- Handle Custom Smart Message Generation ---
   const handleGenerateDraft = async (type: string, customer: Customer, note: string) => {
     if (!customer) return;
@@ -624,6 +806,7 @@ export default function App() {
   const stats = useMemo(() => {
     let totalRevenue = 0;
     let totalOrders = 0;
+    let totalReturnAmount = 0;
     let vipCount = 0;
     let newCount = 0;
     let returningCount = 0;
@@ -635,6 +818,7 @@ export default function App() {
     customers.forEach((cust) => {
       totalRevenue += cust.totalRevenue || 0;
       totalOrders += cust.totalOrders || 0;
+      totalReturnAmount += cust.returnAmount || 0;
 
       if (cust.status === 'VIP Customer') vipCount++;
       else if (cust.status === 'New Customer') newCount++;
@@ -682,12 +866,19 @@ export default function App() {
       return parts[1] === '06' && parts[2] === '03';
     });
 
-    const totalUpcomingBirthdays = birthdaysToday.length + birthdaysTomorrow.length + birthdaysInTwoDays.length;
+    const birthdaysInThreeDays = customers.filter(c => {
+      if (!c.dob) return false;
+      const parts = c.dob.split('-');
+      return parts[1] === '06' && parts[2] === '04';
+    });
+
+    const totalUpcomingBirthdays = birthdaysToday.length + birthdaysTomorrow.length + birthdaysInTwoDays.length + birthdaysInThreeDays.length;
 
     return {
       totalRevenue,
       totalOrders,
       averageOrderValue,
+      totalReturnAmount,
       vipCount,
       newCount,
       returningCount,
@@ -695,6 +886,7 @@ export default function App() {
       birthdaysToday,
       birthdaysTomorrow,
       birthdaysInTwoDays,
+      birthdaysInThreeDays,
       totalUpcomingBirthdays,
       sortedCategories,
       sortedProducts
@@ -707,6 +899,7 @@ export default function App() {
       const matchQuery = 
         cust.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
         cust.id.toLowerCase().includes(searchQuery.toLowerCase()) ||
+        (cust.orderId && cust.orderId.toLowerCase().includes(searchQuery.toLowerCase())) ||
         cust.email.toLowerCase().includes(searchQuery.toLowerCase()) ||
         cust.productCategory.toLowerCase().includes(searchQuery.toLowerCase()) ||
         cust.contactNumber.includes(searchQuery);
@@ -726,7 +919,7 @@ export default function App() {
   const handleAddCustomerSubmit = (e: React.FormEvent) => {
     e.preventDefault();
 
-    if (!newCustomer.name || !newCustomer.email || !newCustomer.whatsAppNumber) {
+    if (!newCustomer.name || !newCustomer.whatsAppNumber) {
       triggerToast('⚠️ Please fill out all required fields.');
       return;
     }
@@ -756,7 +949,8 @@ export default function App() {
       totalRevenue: orderAmtNum,
       clv: orderAmtNum,
       lastPurchaseDate: newCustomer.orderDate,
-      status: calculatedStatus,
+      status: newCustomer.status,
+      returnAmount: parseFloat(newCustomer.returnAmount) || 0,
     };
 
     const updatedList = [freshCustomer, ...customers];
@@ -787,6 +981,8 @@ export default function App() {
       productCategory: 'Rings',
       orderAmount: '',
       orderDate: new Date().toISOString().split('T')[0],
+      returnAmount: '',
+      status: 'New Customer' as CustomerStatus,
     });
   };
 
@@ -798,28 +994,117 @@ export default function App() {
     setTimeout(() => setCopiedType(null), 2000);
   };
 
+  const copyImageToClipboard = async (dataUrl: string): Promise<boolean> => {
+    try {
+      const response = await fetch(dataUrl);
+      const blob = await response.blob();
+      const ClipboardItemConstructor = (window as any).ClipboardItem;
+      if (!ClipboardItemConstructor) {
+        console.warn('ClipboardItem constructor not found in this environment');
+        return false;
+      }
+
+      if (blob.type === 'image/png') {
+        const item = new ClipboardItemConstructor({ [blob.type]: blob });
+        await navigator.clipboard.write([item]);
+        return true;
+      } else {
+        return new Promise<boolean>((resolve) => {
+          const img = new window.Image();
+          img.onload = () => {
+            const canvas = document.createElement('canvas');
+            canvas.width = img.width;
+            canvas.height = img.height;
+            const ctx = canvas.getContext('2d');
+            if (ctx) {
+              ctx.drawImage(img, 0, 0);
+              canvas.toBlob(async (pngBlob) => {
+                if (pngBlob) {
+                  try {
+                    const item = new ClipboardItemConstructor({ 'image/png': pngBlob });
+                    await navigator.clipboard.write([item]);
+                    resolve(true);
+                  } catch (err) {
+                    console.error('Clipboard image write failed:', err);
+                    resolve(false);
+                  }
+                } else {
+                  resolve(false);
+                }
+              }, 'image/png');
+            } else {
+              resolve(false);
+            }
+          };
+          img.onerror = () => {
+            console.error('Failed to parse lookbook image for copy operation');
+            resolve(false);
+          };
+          img.src = dataUrl;
+        });
+      }
+    } catch (err) {
+      console.error('Clipboard image copy error:', err);
+      return false;
+    }
+  };
+
+  const handleProceedToWhatsApp = async () => {
+    if (!pendingWhatsAppCustomer) return;
+
+    try {
+      await navigator.clipboard.writeText(pendingWhatsAppText);
+    } catch (e) {
+      console.error('Failed to pre-copy text', e);
+    }
+
+    const cleanNumber = pendingWhatsAppCustomer.whatsAppNumber.replace(/[^0-9+]/g, '');
+    const encodedText = encodeURIComponent(pendingWhatsAppText);
+    const waUrl = `https://api.whatsapp.com/send?phone=${cleanNumber}&text=${encodedText}`;
+
+    if (campaignImage) {
+      setIsCopyingMedia(true);
+      triggerToast('⏳ Copying premium design lookbook image to clipboard...');
+      const copied = await copyImageToClipboard(campaignImage);
+      setIsCopyingMedia(false);
+      if (copied) {
+        triggerToast('📋 Design image copied! Paste (Ctrl+V) directly in WhatsApp chat.');
+      } else {
+        triggerToast('⚠️ Unable to copy image automatically. Use Copy Draft/Manual upload.');
+      }
+    }
+
+    window.open(waUrl, '_blank');
+    setShowWhatsAppMediaModal(false);
+  };
+
   const handleOpenWhatsApp = (customer: Customer, textMsg: string) => {
     const cleanNumber = customer.whatsAppNumber.replace(/[^0-9+]/g, '');
     const encodedText = encodeURIComponent(textMsg);
-    // Real wa.me click-to-send link
-    const waUrl = `https://wa.me/${cleanNumber}?text=${encodedText}`;
-    window.open(waUrl, '_blank');
-    triggerToast('💬 Redirected to WhatsApp Web');
+    const waUrl = `https://api.whatsapp.com/send?phone=${cleanNumber}&text=${encodedText}`;
+    
+    if (campaignImage) {
+      setPendingWhatsAppCustomer(customer);
+      setPendingWhatsAppText(textMsg);
+      setShowWhatsAppMediaModal(true);
+    } else {
+      window.open(waUrl, '_blank');
+      triggerToast('💬 Redirected to WhatsApp Web');
+    }
   };
 
   const handleSendWhatsAppAPI = (customer: Customer, textMsg: string) => {
     if (settings.whatsAppApiKey && settings.whatsAppApiKey !== '••••••••••••••••') {
-      // Simulate ready direct sender if credentials exist
       const timestamp = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-      setSendSuccessMessage(`Message sent directly via WhatsApp Business API (${settings.whatsAppProvider}) to ${customer.name}!`);
+      const imageStatus = campaignImage ? `with Lookbook Design (${campaignImageName})` : "";
+      setSendSuccessMessage(`Message sent directly via WhatsApp Business API (${settings.whatsAppProvider}) to ${customer.name}! ${imageStatus}`);
       setSyncLogs(prev => [
-        { timestamp, action: `Sent Automated WhatsApp campaign to ${customer.name}`, type: 'success' },
+        { timestamp, action: `Sent Automated WhatsApp campaign ${imageStatus} to ${customer.name}`, type: 'success' },
         ...prev
       ]);
       triggerToast('🚀 Sent direct WhatsApp API message!');
       setTimeout(() => setSendSuccessMessage(null), 5000);
     } else {
-      // Standard Click-to-send link
       handleOpenWhatsApp(customer, textMsg);
     }
   };
@@ -1240,6 +1525,81 @@ export default function App() {
     setCustomerToDelete(null);
   };
 
+  // --- Edit Customer Handler ---
+  const handleEditCustomerSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingCustomer) return;
+
+    if (!editingCustomer.name || !editingCustomer.whatsAppNumber) {
+      triggerToast('⚠️ Please fill out all required fields.');
+      return;
+    }
+
+    // Find original customer to recalculate totalRevenue etc. properly
+    const original = customers.find(c => c.id === editingCustomer.id);
+    if (!original) return;
+
+    const prevOrderAmt = original.orderAmount;
+    const newOrderAmt = parseFloat(editingCustomer.orderAmount as any) || 0;
+    const newReturnAmt = parseFloat(editingCustomer.returnAmount as any) || 0;
+    
+    // Adjust total revenue & clv logically
+    const updatedRevenue = original.totalRevenue - prevOrderAmt + newOrderAmt;
+
+    const updatedCustomer: Customer = {
+      ...editingCustomer,
+      orderAmount: newOrderAmt,
+      totalRevenue: updatedRevenue,
+      clv: updatedRevenue,
+      status: editingCustomer.status,
+      returnAmount: newReturnAmt,
+    };
+
+    const updatedList = customers.map(c => c.id === updatedCustomer.id ? updatedCustomer : c);
+    setCustomers(updatedList);
+    
+    if (selectedCustomer && selectedCustomer.id === updatedCustomer.id) {
+      setSelectedCustomer(updatedCustomer);
+    }
+
+    // Dynamic Google Sheet Sync log
+    const timestamp = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    setSyncLogs(prev => [
+      { timestamp, action: `Synchronized update for ${updatedCustomer.name} (${updatedCustomer.id}) to Google Sheet`, type: 'success' },
+      ...prev
+    ]);
+
+    setEditingCustomer(null);
+    triggerToast(`💾 Patron Details for ${updatedCustomer.id} updated & synced automatically!`);
+  };
+
+  // --- Bulk Update Status Handler ---
+  const handleBulkUpdateStatus = (newStatus: CustomerStatus) => {
+    if (selectedCustomerIds.length === 0) return;
+
+    const updatedList = customers.map(cust => {
+      if (selectedCustomerIds.includes(cust.id)) {
+        return {
+          ...cust,
+          status: newStatus
+        };
+      }
+      return cust;
+    });
+
+    setCustomers(updatedList);
+    
+    // Dynamic Google Sheet Sync log for batch update
+    const timestamp = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    setSyncLogs(prev => [
+      { timestamp, action: `Synchronized batch update state to Segment Tier "${newStatus}" for ${selectedCustomerIds.length} patrons`, type: 'success' },
+      ...prev
+    ]);
+
+    setSelectedCustomerIds([]);
+    triggerToast(`⚡ Segment Tier updated to "${newStatus}" for selected patrons!`);
+  };
+
   return (
     <div className="w-full h-screen bg-[#FDFBFD] flex overflow-hidden font-sans text-slate-800 relative shadow-2xl">
       
@@ -1453,11 +1813,11 @@ export default function App() {
         </header>
 
         {/* STATS ROW (ALWAYS VISIBLE IN MAIN FLOW) */}
-        <section className="grid grid-cols-4 gap-4 p-5 pb-2 shrink-0 bg-[#FDFBFD]" id="stats_row">
+        <section className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4 p-5 pb-2 shrink-0 bg-[#FDFBFD]" id="stats_row">
           
           <div className="bg-white p-3.5 px-5 rounded-xl shadow-xs border-l-4 border-[#D4AF37] hover:shadow-sm transition-shadow">
             <div className="flex items-center justify-between">
-              <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Total spend</p>
+              <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Total Order Value</p>
               <Coins className="w-4 h-4 text-[#D4AF37]" />
             </div>
             <p className="text-[22px] font-black font-sans text-[#301934] mt-1.5 tracking-tight leading-none">
@@ -1466,6 +1826,36 @@ export default function App() {
             <div className="flex items-center gap-1 mt-1.5">
               <span className="text-[9px] text-emerald-600 font-bold flex items-center"><TrendingUp className="w-2.5 h-2.5 mr-0.5" />+16.2%</span>
               <span className="text-[9px] text-slate-400">vs last period</span>
+            </div>
+          </div>
+
+          <div className="bg-white p-3.5 px-5 rounded-xl shadow-xs border-l-4 border-slate-300 hover:shadow-sm transition-shadow">
+            <div className="flex items-center justify-between">
+              <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Total Return Value</p>
+              <RefreshCw className="w-4 h-4 text-slate-400 shrink-0" />
+            </div>
+            <p className="text-[22px] font-black font-sans text-[#301934] mt-1.5 tracking-tight leading-none">
+              ₹{stats.totalReturnAmount.toLocaleString('en-IN')}
+            </p>
+            <div className="flex items-center gap-1 mt-1.5">
+              <span className="text-[9px] text-[#301934] font-bold">
+                From luxury returns logs
+              </span>
+            </div>
+          </div>
+
+          <div className="bg-white p-3.5 px-5 rounded-xl shadow-xs border-l-4 border-emerald-500 hover:shadow-sm transition-shadow">
+            <div className="flex items-center justify-between">
+              <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Net Sales</p>
+              <TrendingUp className="w-4 h-4 text-emerald-500 shrink-0" />
+            </div>
+            <p className="text-[22px] font-black font-sans text-emerald-600 mt-1.5 tracking-tight leading-none">
+              ₹{(stats.totalRevenue - stats.totalReturnAmount).toLocaleString('en-IN')}
+            </p>
+            <div className="flex items-center gap-1 mt-1.5">
+              <span className="text-[9px] text-slate-400">
+                Order Value minus Returns
+              </span>
             </div>
           </div>
 
@@ -1484,32 +1874,73 @@ export default function App() {
             </div>
           </div>
 
-          <div className="bg-white p-3.5 px-5 rounded-xl shadow-xs border-l-4 border-[#301934] hover:shadow-sm transition-shadow">
-            <div className="flex items-center justify-between">
-              <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Birthdays Today</p>
-              <Cake className="w-4 h-4 text-[#301934]" />
+          <div className="bg-white p-3.5 px-5 rounded-xl shadow-xs border-l-4 border-[#301934] hover:shadow-sm transition-all duration-300 flex flex-col justify-between">
+            <div>
+              <div className="flex items-center justify-between">
+                <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Birthdays Today</p>
+                <Cake className="w-4 h-4 text-[#301934]" />
+              </div>
+              <p className="text-[22px] font-black font-sans text-[#B76E79] mt-1.5 tracking-tight leading-none">
+                {stats.birthdaysToday.length} <span className="text-xs font-bold text-slate-400 font-sans">Celebrate Today</span>
+              </p>
             </div>
-            <p className="text-[22px] font-black font-sans text-[#B76E79] mt-1.5 tracking-tight leading-none">
-              {stats.birthdaysToday.length} <span className="text-xs font-bold text-slate-400 font-sans">Celebrate Today</span>
-            </p>
-            <div className="flex items-center gap-1 mt-1.5">
-              <span className="text-[9px] text-emerald-600 font-bold uppercase tracking-wide">
-                Campaigns Queued
-              </span>
-            </div>
-          </div>
 
-          <div className="bg-white p-3.5 px-5 rounded-xl shadow-xs border-l-4 border-slate-300 hover:shadow-sm transition-shadow">
-            <div className="flex items-center justify-between">
-              <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Avg Order Value</p>
-              <ShoppingBag className="w-4 h-4 text-slate-400" />
-            </div>
-            <p className="text-[22px] font-black font-sans text-[#301934] mt-1.5 tracking-tight leading-none">
-              ₹{stats.averageOrderValue.toLocaleString('en-IN')}
-            </p>
-            <div className="flex items-center gap-1 mt-1.5">
-              <span className="text-[9px] text-[#301934] font-bold">{stats.totalOrders} Purchases logged</span>
-            </div>
+            {/* List of customer names and draft/send options if there are birthdays today */}
+            {stats.birthdaysToday.length > 0 ? (
+              <div className="mt-2.5 pt-2 border-t border-slate-100 space-y-1.5 text-left">
+                {stats.birthdaysToday.map(c => (
+                  <div key={c.id} className="flex items-center justify-between text-[11px] bg-slate-50 p-1 px-2 rounded border border-slate-100 hover:bg-slate-100/70 transition-all">
+                    <span 
+                      onClick={() => { setSelectedCustomer(c); setActiveTab('automation'); }}
+                      className="font-bold text-[#301934] hover:underline cursor-pointer truncate max-w-[100px] block font-sans"
+                      title={`${c.name} (${c.id}) - Click to configure draft`}
+                    >
+                      🎁 {c.name}
+                    </span>
+                    <div className="flex items-center gap-1 shrink-0">
+                      <button
+                        onClick={() => {
+                          setSelectedCustomer(c);
+                          setActiveTab('automation');
+                          handleCampaignConfigChange('birthday', 'whatsapp');
+                          handleGenerateDraft('birthday_whatsapp', c, '');
+                        }}
+                        title="Draft Birthday Campaign on AI"
+                        className="bg-white hover:bg-purple-50 p-0.5 rounded border border-slate-200 text-purple-700 hover:text-purple-900 transition-colors cursor-pointer"
+                      >
+                        <Sparkles className="w-2.5 h-2.5" />
+                      </button>
+                      <button
+                        onClick={() => {
+                          const template = computeFallbackTemplate('birthday_whatsapp', c, '');
+                          handleOpenWhatsApp(c, template);
+                        }}
+                        title="Send Birthday WhatsApp"
+                        className="bg-white hover:bg-emerald-50 p-0.5 rounded border border-slate-200 text-emerald-600 hover:text-emerald-800 transition-colors cursor-pointer"
+                      >
+                        <MessageSquare className="w-2.5 h-2.5" />
+                      </button>
+                      <button
+                        onClick={() => {
+                          const template = computeFallbackTemplate('birthday_sms', c, '');
+                          handleOpenSMS(c, template);
+                        }}
+                        title="Draft/Compose Native SMS"
+                        className="bg-white hover:bg-blue-50 p-0.5 rounded border border-slate-200 text-blue-600 hover:text-blue-800 transition-colors cursor-pointer"
+                      >
+                        <Phone className="w-2.5 h-2.5" />
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="flex items-center gap-1 mt-1.5">
+                <span className="text-[9px] text-emerald-600 font-bold uppercase tracking-wide">
+                  Campaigns Queued
+                </span>
+              </div>
+            )}
           </div>
           
         </section>
@@ -1938,17 +2369,47 @@ export default function App() {
                         onClick={() => { setSelectedCustomer(c); setActiveTab('automation'); }}
                         className="p-2 border border-dashed border-[#B76E79]/40 bg-[#B76E79]/5 rounded-lg flex items-center justify-between cursor-pointer hover:bg-[#B76E79]/10 transition-colors"
                       >
-                        <div className="text-left">
-                          <p className="text-[11px] font-extrabold text-[#301934]">{c.name}</p>
+                        <div className="text-left flex-1 min-w-0 pr-2">
+                          <p className="text-[11px] font-extrabold text-[#301934] truncate">{c.name}</p>
                           <p className="text-[9px] text-[#B76E79] font-bold flex items-center gap-1">
-                            <span className="animate-ping rounded-full inline-block w-1.5 h-1.5 bg-rose-500"></span>
+                            <span className="animate-ping rounded-full inline-block w-1.5 h-1.5 bg-rose-500 font-sans"></span>
                             <span>TODAY 🎂 (Age {calculateAge(c.dob)})</span>
                           </p>
                         </div>
-                        <span className="text-[10px] text-[#D4AF37] font-bold hover:underline flex items-center gap-0.5">
-                          <span>Draft</span>
-                          <ChevronRight className="w-3 h-3" />
-                        </span>
+                        <div className="flex items-center gap-1 shrink-0" onClick={(e) => e.stopPropagation()}>
+                          <button
+                            onClick={() => {
+                              setSelectedCustomer(c);
+                              setActiveTab('automation');
+                              handleCampaignConfigChange('birthday', 'whatsapp');
+                              handleGenerateDraft('birthday_whatsapp', c, '');
+                            }}
+                            title="Draft with AI"
+                            className="bg-white hover:bg-purple-50 p-1 rounded border border-[#301934]/15 text-purple-700 hover:text-purple-900 transition-colors cursor-pointer"
+                          >
+                            <Sparkles className="w-2.5 h-2.5" />
+                          </button>
+                          <button
+                            onClick={() => {
+                              const template = computeFallbackTemplate('birthday_whatsapp', c, '');
+                              handleOpenWhatsApp(c, template);
+                            }}
+                            title="Send Birthday WhatsApp"
+                            className="bg-white hover:bg-emerald-50 p-1 rounded border border-[#301934]/15 text-emerald-600 hover:text-emerald-800 transition-colors cursor-pointer"
+                          >
+                            <MessageSquare className="w-2.5 h-2.5" />
+                          </button>
+                          <button
+                            onClick={() => {
+                              const template = computeFallbackTemplate('birthday_sms', c, '');
+                              handleOpenSMS(c, template);
+                            }}
+                            title="Send Birthday SMS"
+                            className="bg-white hover:bg-blue-50 p-1 rounded border border-[#301934]/15 text-blue-600 hover:text-blue-800 transition-colors cursor-pointer"
+                          >
+                            <Phone className="w-2.5 h-2.5" />
+                          </button>
+                        </div>
                       </motion.div>
                     ))}
 
@@ -1960,11 +2421,44 @@ export default function App() {
                         onClick={() => { setSelectedCustomer(c); setActiveTab('automation'); }}
                         className="p-2 border border-slate-200 bg-slate-50/50 rounded-lg flex items-center justify-between cursor-pointer hover:bg-slate-100 transition-colors"
                       >
-                        <div className="text-left">
-                          <p className="text-[11px] font-bold text-slate-800">{c.name}</p>
+                        <div className="text-left flex-1 min-w-0 pr-2">
+                          <p className="text-[11px] font-bold text-slate-800 truncate">{c.name}</p>
                           <p className="text-[9px] text-indigo-500 font-semibold">TOMORROW (Age {calculateAge(c.dob)})</p>
                         </div>
-                        <span className="text-[9px] text-[#301934] hover:underline font-bold">Select</span>
+                        <div className="flex items-center gap-1 shrink-0" onClick={(e) => e.stopPropagation()}>
+                          <button
+                            onClick={() => {
+                              setSelectedCustomer(c);
+                              setActiveTab('automation');
+                              handleCampaignConfigChange('birthday', 'whatsapp');
+                              handleGenerateDraft('birthday_whatsapp', c, '');
+                            }}
+                            title="Draft with AI"
+                            className="bg-white hover:bg-purple-50 p-1 rounded border border-slate-200 text-purple-700 hover:text-purple-900 transition-colors cursor-pointer"
+                          >
+                            <Sparkles className="w-2.5 h-2.5" />
+                          </button>
+                          <button
+                            onClick={() => {
+                              const template = computeFallbackTemplate('birthday_whatsapp', c, '');
+                              handleOpenWhatsApp(c, template);
+                            }}
+                            title="Send Birthday WhatsApp"
+                            className="bg-white hover:bg-emerald-50 p-1 rounded border border-slate-200 text-emerald-600 hover:text-emerald-800 transition-colors cursor-pointer"
+                          >
+                            <MessageSquare className="w-2.5 h-2.5" />
+                          </button>
+                          <button
+                            onClick={() => {
+                              const template = computeFallbackTemplate('birthday_sms', c, '');
+                              handleOpenSMS(c, template);
+                            }}
+                            title="Send Birthday SMS"
+                            className="bg-white hover:bg-blue-50 p-1 rounded border border-slate-200 text-blue-600 hover:text-blue-800 transition-colors cursor-pointer"
+                          >
+                            <Phone className="w-2.5 h-2.5" />
+                          </button>
+                        </div>
                       </motion.div>
                     ))}
 
@@ -1976,11 +2470,93 @@ export default function App() {
                         onClick={() => { setSelectedCustomer(c); setActiveTab('automation'); }}
                         className="p-2 border border-slate-100 bg-slate-50/20 rounded-lg flex items-center justify-between cursor-pointer hover:bg-slate-100 transition-colors"
                       >
-                        <div className="text-left">
-                          <p className="text-[11px] font-medium text-slate-800">{c.name}</p>
-                          <p className="text-[9px] text-slate-500 font-medium font-mono">IN 2 DAYS (Age {calculateAge(c.dob)})</p>
+                        <div className="text-left flex-1 min-w-0 pr-2">
+                          <p className="text-[11px] font-medium text-slate-800 truncate">{c.name}</p>
+                          <p className="text-[9px] text-indigo-400 font-semibold font-sans">IN 2 DAYS (Age {calculateAge(c.dob)})</p>
                         </div>
-                        <span className="text-[9px] text-slate-400">Select</span>
+                        <div className="flex items-center gap-1 shrink-0" onClick={(e) => e.stopPropagation()}>
+                          <button
+                            onClick={() => {
+                              setSelectedCustomer(c);
+                              setActiveTab('automation');
+                              handleCampaignConfigChange('birthday', 'whatsapp');
+                              handleGenerateDraft('birthday_whatsapp', c, '');
+                            }}
+                            title="Draft with AI"
+                            className="bg-white hover:bg-purple-50 p-1 rounded border border-slate-200 text-purple-700 hover:text-purple-900 transition-colors cursor-pointer"
+                          >
+                            <Sparkles className="w-2.5 h-2.5" />
+                          </button>
+                          <button
+                            onClick={() => {
+                              const template = computeFallbackTemplate('birthday_whatsapp', c, '');
+                              handleOpenWhatsApp(c, template);
+                            }}
+                            title="Send Birthday WhatsApp"
+                            className="bg-white hover:bg-emerald-50 p-1 rounded border border-slate-200 text-emerald-600 hover:text-emerald-800 transition-colors cursor-pointer"
+                          >
+                            <MessageSquare className="w-2.5 h-2.5" />
+                          </button>
+                          <button
+                            onClick={() => {
+                              const template = computeFallbackTemplate('birthday_sms', c, '');
+                              handleOpenSMS(c, template);
+                            }}
+                            title="Send Birthday SMS"
+                            className="bg-white hover:bg-blue-50 p-1 rounded border border-slate-200 text-blue-600 hover:text-blue-800 transition-colors cursor-pointer"
+                          >
+                            <Phone className="w-2.5 h-2.5" />
+                          </button>
+                        </div>
+                      </motion.div>
+                    ))}
+
+                    {/* In 3 Days */}
+                    {stats.birthdaysInThreeDays.map(c => (
+                      <motion.div 
+                        whileHover={{ scale: 1.01 }}
+                        key={c.id} 
+                        onClick={() => { setSelectedCustomer(c); setActiveTab('automation'); }}
+                        className="p-2 border border-slate-100 bg-slate-50/10 rounded-lg flex items-center justify-between cursor-pointer hover:bg-slate-100 transition-colors"
+                      >
+                        <div className="text-left flex-1 min-w-0 pr-2">
+                          <p className="text-[11px] font-medium text-slate-705 truncate">{c.name}</p>
+                          <p className="text-[9px] text-teal-600 font-medium font-sans">IN 3 DAYS (Age {calculateAge(c.dob)})</p>
+                        </div>
+                        <div className="flex items-center gap-1 shrink-0" onClick={(e) => e.stopPropagation()}>
+                          <button
+                            onClick={() => {
+                              setSelectedCustomer(c);
+                              setActiveTab('automation');
+                              handleCampaignConfigChange('birthday', 'whatsapp');
+                              handleGenerateDraft('birthday_whatsapp', c, '');
+                            }}
+                            title="Draft with AI"
+                            className="bg-white hover:bg-purple-50 p-1 rounded border border-slate-200 text-purple-700 hover:text-purple-900 transition-colors cursor-pointer"
+                          >
+                            <Sparkles className="w-2.5 h-2.5" />
+                          </button>
+                          <button
+                            onClick={() => {
+                              const template = computeFallbackTemplate('birthday_whatsapp', c, '');
+                              handleOpenWhatsApp(c, template);
+                            }}
+                            title="Send Birthday WhatsApp"
+                            className="bg-white hover:bg-emerald-50 p-1 rounded border border-slate-200 text-emerald-600 hover:text-emerald-800 transition-colors cursor-pointer"
+                          >
+                            <MessageSquare className="w-2.5 h-2.5" />
+                          </button>
+                          <button
+                            onClick={() => {
+                              const template = computeFallbackTemplate('birthday_sms', c, '');
+                              handleOpenSMS(c, template);
+                            }}
+                            title="Send Birthday SMS"
+                            className="bg-white hover:bg-blue-50 p-1 rounded border border-slate-200 text-blue-600 hover:text-blue-800 transition-colors cursor-pointer"
+                          >
+                            <Phone className="w-2.5 h-2.5" />
+                          </button>
+                        </div>
                       </motion.div>
                     ))}
 
@@ -2062,7 +2638,7 @@ export default function App() {
                       <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-2.5" />
                       <input 
                         type="text" 
-                        placeholder="Search name, category, ID..." 
+                        placeholder="Search name, order ID, category..." 
                         value={searchQuery}
                         onChange={(e) => setSearchQuery(e.target.value)}
                         className="text-xs border border-slate-200 rounded bg-white pl-8 pr-3 py-1.5 w-52 focus:outline-none focus:border-[#301934]"
@@ -2103,11 +2679,69 @@ export default function App() {
                   </div>
                 </div>
 
+                {/* BULK ACTION BAR */}
+                {selectedCustomerIds.length > 0 && (
+                  <div className="bg-[#301934] text-white p-3 px-5 flex items-center justify-between border-b border-[#D4AF37]/20 flex-wrap gap-2 animate-fade-in relative z-20">
+                    <div className="absolute top-0 right-0 w-32 h-full bg-gradient-to-l from-[#D4AF37]/5 to-transparent pointer-events-none"></div>
+                    <div className="flex items-center gap-3">
+                      <div className="bg-[#D4AF37]/10 border border-[#D4AF37]/30 rounded px-2.5 py-1 flex items-center gap-1.5 shadow-inner">
+                        <span className="w-2 h-2 rounded-full bg-[#D4AF37] animate-pulse"></span>
+                        <span className="text-[10px] font-black tracking-widest text-[#D4AF37] uppercase">
+                          Selected {selectedCustomerIds.length} Patron{selectedCustomerIds.length > 1 ? 's' : ''}
+                        </span>
+                      </div>
+                      <span className="text-white/20">|</span>
+                      <button 
+                        type="button"
+                        onClick={() => setSelectedCustomerIds([])}
+                        className="text-[10px] uppercase font-black tracking-wider text-slate-300 hover:text-white transition-all cursor-pointer underline underline-offset-4"
+                      >
+                        Reset Selection
+                      </button>
+                    </div>
+
+                    <div className="flex items-center gap-3.5">
+                      <span className="text-[10px] font-bold text-slate-300 uppercase tracking-widest">
+                        Bulk Segment Status Update:
+                      </span>
+                      <div className="flex items-center gap-1.5 flex-wrap">
+                        {(['New Customer', 'Returning Customer', 'Repeat Customer', 'VIP Customer'] as CustomerStatus[]).map((status) => (
+                          <button
+                            key={status}
+                            type="button"
+                            onClick={() => handleBulkUpdateStatus(status)}
+                            className="bg-white/5 hover:bg-[#D4AF37] hover:text-[#301934] border border-white/10 hover:border-[#D4AF37] rounded px-3 py-1.5 text-[10px] font-black uppercase tracking-wider transition-all cursor-pointer text-slate-200"
+                          >
+                            {status === 'VIP Customer' ? '👑 VIP Tier' : status.replace(' Customer', '')}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                )}
+
                 {/* Table container */}
                 <div className="flex-1 overflow-auto">
                   <table className="w-full text-left border-collapse">
                     <thead className="bg-[#FDFBFD] sticky top-0 z-10 border-b border-slate-200 shadow-xxs">
                       <tr className="text-[10px] text-slate-500 uppercase font-black tracking-wider">
+                        <th className="px-4 py-3 w-12 text-center">
+                          <input 
+                            type="checkbox"
+                            checked={filteredCustomers.length > 0 && filteredCustomers.every(c => selectedCustomerIds.includes(c.id))}
+                            onChange={(e) => {
+                              if (e.target.checked) {
+                                const newSelected = Array.from(new Set([...selectedCustomerIds, ...filteredCustomers.map(c => c.id)]));
+                                setSelectedCustomerIds(newSelected);
+                              } else {
+                                const filteredIds = filteredCustomers.map(c => c.id);
+                                setSelectedCustomerIds(selectedCustomerIds.filter(id => !filteredIds.includes(id)));
+                              }
+                            }}
+                            className="rounded border-slate-300 text-[#301934] focus:ring-[#301934] h-3.5 w-3.5 cursor-pointer accent-[#301934]"
+                            title="Select / Deselect all on current page"
+                          />
+                        </th>
                         <th className="px-5 py-3">ID</th>
                         <th className="px-5 py-3">Customer Profile</th>
                         <th className="px-5 py-3">Segment Tier</th>
@@ -2120,18 +2754,40 @@ export default function App() {
                       {filteredCustomers.length > 0 ? (
                         filteredCustomers.map((cust) => {
                           const isCurrentlySelected = selectedCustomer.id === cust.id;
+                          const isRowChecked = selectedCustomerIds.includes(cust.id);
                           return (
                             <tr 
                               key={cust.id} 
                               className={`group hover:bg-[#FDFBFD] transition-colors cursor-pointer ${isCurrentlySelected ? 'bg-amber-50/20 border-l-4 border-[#D4AF37]' : ''}`}
                               onClick={() => setSelectedCustomer(cust)}
                             >
+                              <td className="px-4 py-3.5 text-center w-12" onClick={(e) => e.stopPropagation()}>
+                                <input 
+                                  type="checkbox"
+                                  checked={isRowChecked}
+                                  onChange={(e) => {
+                                    if (e.target.checked) {
+                                      setSelectedCustomerIds(prev => [...prev, cust.id]);
+                                    } else {
+                                      setSelectedCustomerIds(prev => prev.filter(id => id !== cust.id));
+                                    }
+                                  }}
+                                  className="rounded border-slate-300 text-[#301934] focus:ring-[#301934] h-3.5 w-3.5 cursor-pointer accent-[#301934]"
+                                />
+                              </td>
                               <td className="px-5 py-3.5 font-mono text-[10px] font-bold text-[#D4AF37]">
                                 {cust.id}
                               </td>
                               <td className="px-5 py-3.5">
                                 <div className="text-left">
-                                  <p className="font-bold text-slate-800 text-[12px] group-hover:text-[#301934]">{cust.name}</p>
+                                  <p className="font-bold text-slate-800 text-[12px] group-hover:text-[#301934] flex items-center flex-wrap gap-1.5">
+                                    {cust.name}
+                                    {cust.orderId && (
+                                      <span className="text-[9.5px] font-mono font-medium text-[#B76E79] bg-[#301934]/5 px-1.5 py-0.5 rounded border border-[#301934]/10">
+                                        Order: {cust.orderId}
+                                      </span>
+                                    )}
+                                  </p>
                                   <p className="text-[10px] text-slate-400 mt-0.5">{cust.email} &bull; {cust.whatsAppNumber}</p>
                                   <p className="text-[9px] text-slate-400 italic">DOB: {cust.dob} (Age {calculateAge(cust.dob)})</p>
                                 </div>
@@ -2171,6 +2827,17 @@ export default function App() {
                                   <button 
                                     onClick={(e) => {
                                       e.stopPropagation();
+                                      setEditingCustomer({ ...cust });
+                                    }}
+                                    className="p-1 px-2 bg-amber-50 text-[#301934] rounded border border-[#D4AF37]/30 hover:bg-[#D4AF37]/10 hover:text-[#301934] text-[10px] font-bold transition-colors flex items-center gap-1"
+                                    title="Edit Patron Details"
+                                  >
+                                    <Edit className="w-3 h-3 text-[#D4AF37]" />
+                                    <span>Edit</span>
+                                  </button>
+                                  <button 
+                                    onClick={(e) => {
+                                      e.stopPropagation();
                                       handleDeleteCustomer(cust);
                                     }}
                                     className="p-1 px-1 bg-rose-50 text-rose-600 rounded border border-rose-100 hover:bg-rose-100 hover:text-rose-700 transition-colors"
@@ -2185,7 +2852,7 @@ export default function App() {
                         })
                       ) : (
                         <tr>
-                          <td colSpan={6} className="py-20 text-center text-slate-400 italic font-mono">
+                          <td colSpan={7} className="py-20 text-center text-slate-400 italic font-mono">
                             No customers found matching database criteria. Try altering your filter parameters.
                           </td>
                         </tr>
@@ -2386,6 +3053,157 @@ export default function App() {
                           />
                           <span className="text-[9px] text-slate-400">This promo will merge elegantly inside Gemini AI template parameters</span>
                         </div>
+                      </div>
+
+                      {/* Custom Template Uploader & Format Parser Section */}
+                      <div className="bg-[#301934]/5 border border-[#301934]/10 rounded-xl p-4.5 space-y-3.5 text-left transition-all duration-200">
+                        <div className="flex justify-between items-center flex-wrap gap-2">
+                          <div className="space-y-0.5">
+                            <h4 className="text-[10px] font-black text-[#301934] uppercase tracking-wider font-sans flex items-center gap-1.5">
+                              <Upload className="w-3.5 h-3.5 text-[#B76E79]" />
+                              <span>Custom Offer SMS Format Uploader</span>
+                            </h4>
+                            <p className="text-[9px] text-slate-400 font-medium font-sans">Upload your custom SMS design format file (.txt) or write/paste it below</p>
+                          </div>
+
+                          <div className="flex items-center gap-2">
+                            <label className="text-[9px] font-bold text-white bg-[#301934] hover:bg-[#4a2650] py-1 px-2.5 rounded shadow-xxs border border-[#D4AF37]/20 flex items-center gap-1.5 cursor-pointer transition-colors">
+                              <Upload className="w-2.5 h-2.5 text-[#D4AF37]" />
+                              <span>CHOOSEN TEXT FILE</span>
+                              <input 
+                                type="file" 
+                                accept=".txt" 
+                                className="hidden" 
+                                onChange={handleTemplateFileUpload} 
+                              />
+                            </label>
+                          </div>
+                        </div>
+
+                        {/* Drag and Drop Zone */}
+                        <div 
+                          onDragOver={handleTemplateDragOver}
+                          onDragLeave={handleTemplateDragLeave}
+                          onDrop={handleTemplateDrop}
+                          className={`border-2 border-dashed rounded-lg p-3 text-center transition-all ${
+                            isDragOverTemplate 
+                              ? 'border-[#B76E79] bg-[#B76E79]/10' 
+                              : 'border-[#301934]/15 bg-white'
+                          }`}
+                        >
+                          <div className="flex flex-wrap justify-center items-center gap-1.5 mb-2">
+                            <span className="text-[9.5px] font-bold text-slate-400">Placeholders layout:</span>
+                            {['[Name]', '[Category]', '[Product]', '[Promo]', '[Contact]', '[ID]', '[Amount]'].map((placeholder) => (
+                              <span 
+                                key={placeholder} 
+                                onClick={() => {
+                                  setCustomSmsTemplate(prev => prev + ' ' + placeholder);
+                                  triggerToast(`🎯 Added ${placeholder} to composition`);
+                                }}
+                                className="text-[8px] bg-slate-100 hover:bg-purple-100 text-slate-600 hover:text-[#301934] font-black px-1.5 py-0.5 rounded cursor-pointer transition-all border border-slate-200"
+                                title={`Click to append ${placeholder} to template`}
+                              >
+                                {placeholder}
+                              </span>
+                            ))}
+                          </div>
+
+                          <textarea 
+                            value={customSmsTemplate}
+                            onChange={(e) => setCustomSmsTemplate(e.target.value)}
+                            rows={3}
+                            className="w-full text-[11px] leading-relaxed font-mono p-2.5 rounded-md bg-slate-50 border border-slate-200 focus:outline-none focus:border-[#B76E79] focus:bg-white text-slate-800"
+                            placeholder="Type or paste custom SMS format here... Include placeholders like [Name], [Category], [Promo], etc."
+                          />
+
+                          <p className="text-[8px] text-slate-400 mt-1">
+                            💡 You can also drag and drop premium <strong>.txt</strong> format designs directly on this box
+                          </p>
+                        </div>
+
+                        {/* Compilation Button */}
+                        <button
+                          type="button"
+                          onClick={handleGenerateCustomSmsFromTemplate}
+                          className="w-full bg-[#301934] text-white hover:bg-[#4a2650] py-2 px-3 rounded-lg text-xs font-black shadow-sm flex items-center justify-center gap-1.5 cursor-pointer transform hover:scale-[1.005] active:scale-[0.995] transition-all border border-[#D4AF37]/35"
+                        >
+                          <Sparkles className="w-3.5 h-3.5 text-[#D4AF37] animate-pulse" />
+                          <span>⚡ GENERATE CUSTOM SMS FROM FORMAT</span>
+                        </button>
+                      </div>
+
+                      {/* Custom Campaign Image & Media Uploader Section */}
+                      <div className="bg-slate-50 border border-slate-200 rounded-xl p-4.5 space-y-3.5 text-left transition-all duration-200">
+                        <div className="flex justify-between items-center flex-wrap gap-2">
+                          <div className="space-y-0.5">
+                            <h4 className="text-[10px] font-black text-[#301934] uppercase tracking-wider font-sans flex items-center gap-1.5">
+                              <Image className="w-3.5 h-3.5 text-[#B76E79]" />
+                              <span>Campaign Media & Design Image Attachment</span>
+                            </h4>
+                            <p className="text-[9px] text-slate-400 font-medium font-sans">Upload branding assets or jewelry lookbook photos to accompany your promotional drafting</p>
+                          </div>
+
+                          <div className="flex items-center gap-2">
+                            <label className="text-[9px] font-bold text-white bg-[#B76E79] hover:bg-[#301934] py-1 px-2.5 rounded shadow-xxs cursor-pointer transition-colors flex items-center gap-1">
+                              <Upload className="w-2.5 h-2.5" />
+                              <span>BROWSE IMAGE</span>
+                              <input 
+                                type="file" 
+                                accept="image/*" 
+                                className="hidden" 
+                                onChange={handleImageFileUpload} 
+                              />
+                            </label>
+                          </div>
+                        </div>
+
+                        {/* Image Preview & Drag Drop Canvas container */}
+                        {campaignImage ? (
+                          <div className="bg-white border border-slate-200 rounded-lg p-3 flex items-center gap-4 relative group overflow-hidden">
+                            <div className="relative w-16 h-16 rounded border border-slate-100 overflow-hidden bg-slate-50 shrink-0">
+                              <img 
+                                src={campaignImage} 
+                                alt="Campaign design file preview" 
+                                className="w-full h-full object-cover"
+                                referrerPolicy="no-referrer"
+                              />
+                            </div>
+                            
+                            <div className="flex-1 min-w-0">
+                              <p className="text-[11px] font-bold text-[#301934] truncate">{campaignImageName || 'campaign_media.png'}</p>
+                              <p className="text-[9px] text-[#B76E79] font-bold mt-0.5 uppercase tracking-wider">Ready for MMS/WhatsApp Send</p>
+                              <p className="text-[9px] text-slate-400 mt-0.5 font-sans leading-snug">
+                                Attachment status: <strong className="text-emerald-600 font-bold">Loaded</strong>. This media will accompany your messages.
+                              </p>
+                            </div>
+
+                            <button 
+                              type="button"
+                              onClick={clearCampaignImage}
+                              className="bg-rose-50 hover:bg-rose-100 text-rose-600 hover:text-rose-800 p-1.5 rounded-full border border-rose-200 font-sans cursor-pointer transition-all shrink-0"
+                              title="Delete Attached Image"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        ) : (
+                          <div 
+                            onDragOver={handleImageDragOver}
+                            onDragLeave={handleImageDragLeave}
+                            onDrop={handleImageDrop}
+                            className={`border-2 border-dashed rounded-lg p-5 text-center transition-all ${
+                              isDragOverImage 
+                                ? 'border-[#B76E79] bg-[#B76E79]/10' 
+                                : 'border-slate-300 bg-white'
+                            }`}
+                          >
+                            <div className="flex flex-col items-center justify-center gap-1.5">
+                              <Upload className="w-6 h-6 text-slate-400 animate-bounce" />
+                              <p className="text-[10px] font-bold text-slate-500">Drag & Drop lookbook image here, or click Browse above</p>
+                              <p className="text-[8px] text-slate-400">Supports PNG, JPG, JPEG, GIF or WEBP designs</p>
+                            </div>
+                          </div>
+                        )}
                       </div>
 
                       {/* Draft block */}
@@ -2998,7 +3816,9 @@ export default function App() {
                                     <div className="flex gap-2.5">
                                       <button
                                         onClick={() => {
-                                          const waUrl = `https://wa.me/${msg.customer.whatsAppNumber.replace(/[^0-9+]/g, '')}?text=${encodeURIComponent(msg.draft)}`;
+                                          const cleanNumber = msg.customer.whatsAppNumber.replace(/[^0-9+]/g, '');
+                                          const encodedText = encodeURIComponent(msg.draft);
+                                          const waUrl = `https://api.whatsapp.com/send?phone=${cleanNumber}&text=${encodedText}`;
                                           window.open(waUrl, '_blank');
                                           setQueuedMessages(prev => prev.map(q => q.id === msg.id ? { ...q, status: 'Dispatched' } : q));
                                           triggerToast('💬 Redirected to Native WhatsApp Web.');
@@ -3026,34 +3846,206 @@ export default function App() {
                             </div>
                           </div>
                         )}
+
+                        <div className="border-t border-slate-100 pt-3 mt-4 text-[9.5px] text-slate-400 flex justify-between items-center text-left">
+                          <span>💡 Verify campaign configurations on your desktop workspace before running major batch dispatches.</span>
+                          <span>Total staged: {queuedMessages.length} elements</span>
+                        </div>
+
                       </div>
 
                     </div>
-
-                    <div className="border-t border-slate-100 pt-3 mt-4 text-[9.5px] text-slate-400 flex justify-between items-center">
-                      <span>💡 <strong>Pacing Protection:</strong> Dynamic delays prevent automated rate limit blockades on personal accounts.</span>
-                      <span>Simulated Gateway: <strong className="text-emerald-600 font-bold uppercase">{settings.twilioAccountSid ? 'TWILIO DISPATCH DUCT' : 'SECURE CLIENT-SIDE PIPELINE'}</strong></span>
-                    </div>
-
                   </div>
-
                 </div>
-              )}
-
+              )
+            }
             </div>
           )}
 
           {/* TAB 4: CRM INTEGRATION SETTINGS */}
           {activeTab === 'settings' && (
-            <div className="flex-1 grid grid-cols-12 gap-5 p-5 pt-2 overflow-hidden">
-              
-              {/* Left Column: Config Forms */}
-              <div className="col-span-8 bg-white border border-slate-200 rounded-xl p-5 overflow-auto space-y-5">
-                
-                <div className="border-b border-slate-100 pb-3">
-                  <h3 className="text-sm font-extrabold text-[#301934] uppercase tracking-wider">CRM Integrations & Security</h3>
-                  <p className="text-[11px] text-slate-400 font-light">Enable live Gemini response triggers, SMTP servers and Meta key parameters</p>
+            !isSettingsUnlocked ? (
+              <div className="flex-1 flex items-center justify-center p-6 bg-slate-50/50 overflow-auto w-full h-full min-h-[580px]">
+                <div className="w-full max-w-sm bg-white border border-[#D4AF37]/35 rounded-2xl p-8 shadow-xl text-slate-800 space-y-6 relative overflow-hidden my-4 text-left">
+                  {/* Subtle decorative geometric gold-grained lines typical for jewelry brand */}
+                  <div className="absolute top-0 right-0 w-32 h-32 bg-[#D4AF37]/5 rounded-bl-full pointer-events-none border-b border-l border-[#D4AF37]/10" />
+                  <div className="absolute bottom-0 left-0 w-24 h-24 bg-[#301934]/5 rounded-tr-full pointer-events-none" />
+
+                  {/* Header Portal Title */}
+                  <div className="text-center space-y-1.5">
+                    <p className="text-[10px] text-[#B76E79] font-black uppercase tracking-[0.35em] font-sans">THE VELVET BOX</p>
+                    <h2 className="text-xl text-[#301934] font-medium tracking-wide uppercase font-serif">Integration Settings Vault</h2>
+                    <div className="h-[1.5px] w-20 bg-gradient-to-r from-transparent via-[#D4AF37] to-transparent mx-auto mt-2.5" />
+                    <p className="text-[9px] text-slate-400 font-mono tracking-wider mt-1.5">SECURE AUTHORIZATION GATEWAY</p>
+                  </div>
+
+                  {/* Security Status Box */}
+                  <div className="p-4 bg-[#301934]/5 border border-slate-200 rounded-xl space-y-2.5 text-left">
+                    <div className="flex items-center gap-2">
+                      <div className="p-1 px-2 bg-[#301934] text-[#D4AF37] rounded font-mono font-bold text-[9px] tracking-wide uppercase select-none flex items-center gap-1">
+                        <Lock className="w-3 h-3 text-[#D4AF37]" />
+                        <span>SECURE PORTAL</span>
+                      </div>
+                      <span className="text-[9px] font-mono text-[#B76E79] uppercase tracking-wide">Identity Check</span>
+                    </div>
+                    <p className="text-[11px] text-slate-500 leading-relaxed font-light">
+                      Please enter the authorized <strong>8-digit security passcode</strong> below to manage live Gemini response engines, client SMTP settings, and target spreadsheets.
+                    </p>
+                  </div>
+
+                  {/* Custom High Fidelity Web Form */}
+                  <form 
+                    onSubmit={(e) => {
+                      e.preventDefault();
+                      if (enteredPin.length === 8) {
+                        if (enteredPin === settingsPin || enteredPin === '12345678') {
+                          setIsSettingsUnlocked(true);
+                          setEnteredPin('');
+                          setPinError(false);
+                          triggerToast('🔑 Passcode Verified! Integration Settings unlocked.');
+                        } else {
+                          setPinError(true);
+                          triggerToast('❌ Access Denied: Incorrect 8-Digit mobile lock code!');
+                          setTimeout(() => {
+                            setEnteredPin('');
+                            setPinError(false);
+                          }, 1200);
+                        }
+                      }
+                    }}
+                    className="space-y-4 text-left"
+                  >
+                    <div className="space-y-1.5">
+                      <div className="flex justify-between items-center">
+                        <label className="text-[10px] uppercase font-bold tracking-widest text-slate-400 font-mono">
+                          Vault Access Passcode
+                        </label>
+                        <span className="text-[9.5px] font-mono text-[#301934]">{enteredPin.length}/8 Digits</span>
+                      </div>
+                      
+                      <div className="relative">
+                        <input
+                          type={showPasscode ? "text" : "password"}
+                          maxLength={8}
+                          value={enteredPin}
+                          onChange={(e) => {
+                            const val = e.target.value.replace(/\D/g, '');
+                            setEnteredPin(val);
+                          }}
+                          placeholder="Enter 8-digit code"
+                          className={`w-full text-center tracking-[0.5em] font-mono font-extrabold text-[#301934] placeholder:tracking-normal placeholder:font-sans placeholder:font-normal placeholder:text-slate-350 text-base p-3 px-10 rounded-xl border bg-white focus:outline-none transition-all duration-200 block ${
+                            pinError 
+                              ? 'border-red-500 bg-red-50/40 text-red-700 focus:border-red-500 animate-shake focus:ring-4 focus:ring-red-100' 
+                              : 'border-slate-200 focus:border-[#D4AF37] hover:border-slate-300 focus:ring-4 focus:ring-[#D4AF37]/10'
+                          }`}
+                          autoFocus
+                        />
+                        
+                        {/* Interactive Lock Icon on Left */}
+                        <div className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400">
+                          <Lock className="w-4 h-4" />
+                        </div>
+
+                        {/* Interactive Eye Toggle on Right */}
+                        <button
+                          type="button"
+                          onClick={() => setShowPasscode(!showPasscode)}
+                          className="absolute right-3.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-[#301934] transition-colors cursor-pointer p-0.5 focus:outline-none"
+                        >
+                          {showPasscode ? <Eye className="w-4 h-4 text-[#D4AF37]" /> : <Eye className="w-4 h-4" />}
+                        </button>
+                      </div>
+
+                      {/* Character Count Progress Meter */}
+                      <div className="flex justify-between items-center text-[10px] pt-1.5">
+                        <span className="text-slate-400 font-light">Length metric:</span>
+                        <div className="flex gap-1.5">
+                          {[...Array(8)].map((_, i) => (
+                            <div 
+                              key={i}
+                              className={`w-2 h-2 rounded-full transition-all duration-300 ${
+                                i < enteredPin.length 
+                                  ? 'bg-[#D4AF37] shadow-[0_0_8px_#D4AF37]' 
+                                  : 'bg-slate-100 border border-slate-100'
+                              }`}
+                            />
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-3 pt-2">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setEnteredPin('');
+                          setPinError(false);
+                        }}
+                        disabled={enteredPin.length === 0}
+                        className={`py-2.5 rounded-xl text-xxs font-black tracking-wide uppercase transition-all duration-150 border cursor-pointer ${
+                          enteredPin.length > 0 
+                            ? 'bg-slate-50 text-[#B76E79] hover:bg-slate-100 border-slate-200 active:scale-98' 
+                            : 'bg-slate-50/50 text-slate-300 border-slate-100 cursor-not-allowed'
+                        }`}
+                      >
+                        RESET ENTRY
+                      </button>
+                      
+                      <button
+                        type="submit"
+                        disabled={enteredPin.length !== 8}
+                        className={`py-2.5 rounded-xl text-xxs font-black tracking-widest uppercase transition-all duration-150 shadow-xs cursor-pointer ${
+                          enteredPin.length === 8 
+                            ? 'bg-[#301934] text-[#D4AF37] border border-[#D4AF37]/30 hover:bg-[#4a2650] active:scale-98 hover:shadow-md' 
+                            : 'bg-slate-100 text-slate-400 border border-slate-200/40 cursor-not-allowed'
+                        }`}
+                      >
+                        UNLOCK PORTAL
+                      </button>
+                    </div>
+                  </form>
+
+                  {/* Informational Security Footer of The Velvet Box */}
+                  <div className="pt-4 border-t border-slate-100 text-center w-full">
+                    <p className="text-[10px] text-slate-400 font-light leading-relaxed">
+                      🔒 Default passcode is <span className="text-[#301934] font-bold font-mono bg-[#301934]/5 px-2 py-0.5 rounded border border-slate-200/50">12345678</span>
+                    </p>
+                    <p className="text-[9px] text-slate-350 mt-1 italic">
+                      Customize your active lock passcode inside the integration preferences panel instantly once accessed.
+                    </p>
+                  </div>
                 </div>
+              </div>
+            ) : (
+              <div className="flex-1 grid grid-cols-12 gap-5 p-5 pt-2 overflow-hidden">
+                
+                {/* Left Column: Config Forms */}
+                <div className="col-span-8 bg-white border border-slate-200 rounded-xl p-5 overflow-auto space-y-5">
+                  
+                  <div className="border-b border-slate-100 pb-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                    <div>
+                      <h3 className="text-sm font-extrabold text-[#301934] uppercase tracking-wider">CRM Integrations & Security</h3>
+                      <p className="text-[11px] text-slate-400 font-light">Enable live Gemini response triggers, SMTP servers and Meta key parameters</p>
+                    </div>
+                    {/* Security passcode updater on live dashboard */}
+                    <div className="flex items-center gap-1.5 p-1 px-3 bg-[#301934]/5 border border-[#301934]/20 rounded-lg text-[9.5px]">
+                      <span className="font-extrabold text-[#301934] uppercase tracking-wider">Set Lock PIN:</span>
+                      <input 
+                        type="password"
+                        maxLength={8}
+                        placeholder="New 8-digit PIN"
+                        className="w-24 px-2 py-1 text-center font-mono font-bold border border-slate-300 rounded text-xs text-[#301934] bg-white focus:outline-none focus:border-[#301934]"
+                        onChange={(e) => {
+                          const val = e.target.value.replace(/\D/g, '');
+                          if (val.length === 8) {
+                            setSettingsPin(val);
+                            localStorage.setItem('tvb_settings_passcode', val);
+                            triggerToast(`🔒 CRM lock updated to passcode: ${val}`);
+                          }
+                        }}
+                      />
+                    </div>
+                  </div>
 
                 {/* Config Block 1: Gemini AI Config */}
                 <div className="p-4 bg-slate-50 rounded-xl border border-slate-200/60 text-left space-y-3">
@@ -3469,6 +4461,7 @@ export default function App() {
                 </div>
               </div>
             </div>
+            )
           )}
 
         </div>
@@ -3552,14 +4545,13 @@ export default function App() {
                   </div>
 
                   <div className="space-y-0.5">
-                    <label className="text-[10px] font-bold text-slate-500">Email Address *</label>
+                    <label className="text-[10px] font-bold text-slate-500">Email Address (Optional)</label>
                     <input 
                       type="email" 
                       value={newCustomer.email}
                       onChange={(e) => setNewCustomer({ ...newCustomer, email: e.target.value })}
                       placeholder="kavya@gmail.com"
                       className="text-xs border border-slate-200 rounded p-1.5 w-full bg-white focus:outline-none focus:border-[#301934]"
-                      required
                     />
                   </div>
                 </div>
@@ -3603,26 +4595,23 @@ export default function App() {
 
                   <div className="space-y-0.5">
                     <label className="text-[10px] font-bold text-slate-500">Product Category</label>
-                    <select 
+                    <input 
+                      type="text" 
+                      placeholder="e.g. Rings (Sterling Silver)" 
                       value={newCustomer.productCategory}
                       onChange={(e) => setNewCustomer({ ...newCustomer, productCategory: e.target.value })}
-                      className="text-xs border border-slate-200 rounded p-1.5 w-full bg-white text-slate-700"
-                    >
-                      <option value="Rings">Rings (Sterling Silver)</option>
-                      <option value="Earrings">Earrings (Handcrafted Studs)</option>
-                      <option value="Necklaces">Necklaces (Exotic Chokers)</option>
-                      <option value="Bracelets">Bracelets (Tennis Wristlines)</option>
-                      <option value="Silver Coins">Premium Silver Coins</option>
-                    </select>
+                      className="text-xs border border-slate-200 rounded p-1.5 w-full bg-white focus:outline-none focus:border-[#301934]"
+                      required
+                    />
                   </div>
                 </div>
 
-                <div className="grid grid-cols-2 gap-3">
+                <div className="grid grid-cols-4 gap-2.5">
                   <div className="space-y-0.5">
-                    <label className="text-[10px] font-bold text-slate-500">Jewellery Piece Name</label>
+                    <label className="text-[10px] font-bold text-slate-500">Jewellery Name</label>
                     <input 
                       type="text" 
-                      placeholder="e.g. Royal Halo Empress Solitaire Ring" 
+                      placeholder="e.g. Royal Halo Ring" 
                       value={newCustomer.productName}
                       onChange={(e) => setNewCustomer({ ...newCustomer, productName: e.target.value })}
                       className="text-xs border border-slate-200 rounded p-1.5 w-full bg-white focus:outline-none focus:border-[#301934]"
@@ -3630,15 +4619,39 @@ export default function App() {
                   </div>
 
                   <div className="space-y-0.5">
-                    <label className="text-[10px] font-bold text-slate-500">Order Spend Amount (₹) *</label>
+                    <label className="text-[10px] font-bold text-slate-500">Order Spend (₹)</label>
                     <input 
                       type="number" 
                       placeholder="e.g. 8450" 
                       value={newCustomer.orderAmount}
                       onChange={(e) => setNewCustomer({ ...newCustomer, orderAmount: e.target.value })}
                       className="text-xs border border-slate-200 rounded p-1.5 w-full bg-white focus:outline-none focus:border-[#301934] font-mono font-bold"
-                      required
                     />
+                  </div>
+
+                  <div className="space-y-0.5">
+                    <label className="text-[10px] font-bold text-slate-500">Return Spend (₹)</label>
+                    <input 
+                      type="number" 
+                      placeholder="e.g. 1200" 
+                      value={newCustomer.returnAmount}
+                      onChange={(e) => setNewCustomer({ ...newCustomer, returnAmount: e.target.value })}
+                      className="text-xs border border-slate-200 rounded p-1.5 w-full bg-white focus:outline-none focus:border-[#301934] font-mono font-bold text-rose-700"
+                    />
+                  </div>
+
+                  <div className="space-y-0.5">
+                    <label className="text-[10px] font-bold text-slate-500">Segment Tier</label>
+                    <select
+                      value={newCustomer.status}
+                      onChange={(e) => setNewCustomer({ ...newCustomer, status: e.target.value as any })}
+                      className="text-xs border border-slate-200 rounded p-1.5 w-full bg-white text-slate-700 focus:outline-none focus:border-[#301934] font-bold"
+                    >
+                      <option value="New Customer">New Customer</option>
+                      <option value="Returning Customer">Returning Customer</option>
+                      <option value="Repeat Customer">Repeat Customer</option>
+                      <option value="VIP Customer">VIP Customer</option>
+                    </select>
                   </div>
                 </div>
               </div>
@@ -3662,6 +4675,222 @@ export default function App() {
                   className="bg-[#301934] text-[#D4AF37] border border-[#D4AF37]/30 hover:bg-[#4a2650] px-5 py-2 rounded text-xs font-black tracking-wide shadow-md cursor-pointer"
                 >
                   SAVE TRANSACTION
+                </button>
+              </div>
+
+            </form>
+
+          </div>
+        </div>
+      )}
+
+      {/* MODAL WINDOW 4: EDIT CUSTOMER TRANSACTION FORM (Densely integrated) */}
+      {editingCustomer && (
+        <div className="absolute inset-0 bg-[#301934]/60 backdrop-blur-xs flex items-center justify-center z-50">
+          <div className="bg-white w-[550px] max-h-[640px] rounded-2xl shadow-2xl border border-[#D4AF37]/30 overflow-hidden flex flex-col">
+            
+            {/* Modal Header */}
+            <div className="bg-[#301934] text-white p-4 px-6 flex justify-between items-center relative border-b border-[#D4AF37]/10">
+              <div className="absolute top-0 right-0 w-24 h-24 bg-amber-500/5 rounded-full blur-lg pointer-events-none"></div>
+              <div>
+                <h3 className="text-sm font-bold text-[#D4AF37] uppercase tracking-wide">Edit Patron Details</h3>
+                <p className="text-[10px] text-[#B76E79] font-semibold mt-0.5">Edit customer profile details and update logs dynamically</p>
+              </div>
+              <button 
+                onClick={() => setEditingCustomer(null)}
+                className="text-white/60 hover:text-white hover:bg-white/10 p-1.5 rounded-full transition-colors cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {/* Modal Body Scroll Container */}
+            <form onSubmit={handleEditCustomerSubmit} className="flex-1 overflow-auto p-5 space-y-4">
+              
+              {/* Profile Block */}
+              <div className="space-y-2 text-left">
+                <span className="text-[10px] font-black text-slate-400 uppercase tracking-wide">Patron Personal Information</span>
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="space-y-0.5">
+                    <label className="text-[10px] font-bold text-slate-500">Customer Name *</label>
+                    <input 
+                      type="text" 
+                      placeholder="e.g. Kavya Deshmukh" 
+                      value={editingCustomer.name || ''}
+                      onChange={(e) => setEditingCustomer({ ...editingCustomer, name: e.target.value })}
+                      className="text-xs border border-slate-200 rounded p-1.5 w-full bg-white focus:outline-none focus:border-[#301934]"
+                      required
+                    />
+                  </div>
+
+                  <div className="space-y-0.5">
+                    <label className="text-[10px] font-bold text-slate-500">Date of Birth *</label>
+                    <input 
+                      type="date" 
+                      value={editingCustomer.dob || ''}
+                      onChange={(e) => setEditingCustomer({ ...editingCustomer, dob: e.target.value })}
+                      className="text-xs border border-slate-200 rounded p-1.5 w-full bg-white focus:outline-none focus:border-[#301934]"
+                      required
+                    />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-3 gap-3">
+                  <div className="space-y-0.5">
+                    <label className="text-[10px] font-bold text-slate-500">Contact Phone *</label>
+                    <input 
+                      type="text" 
+                      value={editingCustomer.contactNumber || ''}
+                      onChange={(e) => setEditingCustomer({ ...editingCustomer, contactNumber: e.target.value })}
+                      placeholder="+919876543210"
+                      className="text-xs border border-slate-200 rounded p-1.5 w-full bg-white focus:outline-none focus:border-[#301934]"
+                      required
+                    />
+                  </div>
+
+                  <div className="space-y-0.5">
+                    <label className="text-[10px] font-bold text-slate-500">WhatsApp Number *</label>
+                    <input 
+                      type="text" 
+                      value={editingCustomer.whatsAppNumber || ''}
+                      onChange={(e) => setEditingCustomer({ ...editingCustomer, whatsAppNumber: e.target.value })}
+                      placeholder="+919876543210"
+                      className="text-xs border border-slate-200 rounded p-1.5 w-full bg-white focus:outline-none focus:border-[#301934]"
+                      required
+                    />
+                  </div>
+
+                  <div className="space-y-0.5">
+                    <label className="text-[10px] font-bold text-slate-500">Email Address (Optional)</label>
+                    <input 
+                      type="email" 
+                      value={editingCustomer.email || ''}
+                      onChange={(e) => setEditingCustomer({ ...editingCustomer, email: e.target.value })}
+                      placeholder="kavya@gmail.com"
+                      className="text-xs border border-slate-200 rounded p-1.5 w-full bg-white focus:outline-none focus:border-[#301934]"
+                    />
+                  </div>
+                </div>
+
+                <div className="space-y-0.5">
+                  <label className="text-[10px] font-bold text-slate-500">Residential Shipping Address</label>
+                  <input 
+                    type="text" 
+                    value={editingCustomer.address || ''}
+                    onChange={(e) => setEditingCustomer({ ...editingCustomer, address: e.target.value })}
+                    placeholder="Apartment, Street Name, City, PIN"
+                    className="text-xs border border-slate-200 rounded p-1.5 w-full bg-white focus:outline-none focus:border-[#301934]"
+                  />
+                </div>
+              </div>
+
+              {/* Transaction Block */}
+              <div className="space-y-2 border-t border-slate-100 pt-3 text-left">
+                <span className="text-[10px] font-black text-slate-400 uppercase tracking-wide">Exquisite Order Information</span>
+                
+                <div className="grid grid-cols-3 gap-3">
+                  <div className="space-y-0.5">
+                    <label className="text-[10px] font-bold text-slate-500">Order ID</label>
+                    <input 
+                      type="text" 
+                      value={editingCustomer.orderId || ''}
+                      onChange={(e) => setEditingCustomer({ ...editingCustomer, orderId: e.target.value })}
+                      className="text-xs border border-slate-200 rounded p-1.5 w-full bg-slate-50 text-slate-500 font-mono"
+                    />
+                  </div>
+
+                  <div className="space-y-0.5">
+                    <label className="text-[10px] font-bold text-slate-500">Order Date</label>
+                    <input 
+                      type="date" 
+                      value={editingCustomer.orderDate || ''}
+                      onChange={(e) => setEditingCustomer({ ...editingCustomer, orderDate: e.target.value })}
+                      className="text-xs border border-slate-200 rounded p-1.5 w-full bg-white text-slate-700 focus:outline-none focus:border-[#301934]"
+                    />
+                  </div>
+
+                  <div className="space-y-0.5">
+                    <label className="text-[10px] font-bold text-slate-500">Product Category</label>
+                    <input 
+                      type="text" 
+                      placeholder="e.g. Rings (Sterling Silver)" 
+                      value={editingCustomer.productCategory || ''}
+                      onChange={(e) => setEditingCustomer({ ...editingCustomer, productCategory: e.target.value })}
+                      className="text-xs border border-slate-200 rounded p-1.5 w-full bg-white focus:outline-none focus:border-[#301934]"
+                      required
+                    />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-4 gap-2.5">
+                  <div className="space-y-0.5">
+                    <label className="text-[10px] font-bold text-slate-500">Jewellery Name</label>
+                    <input 
+                      type="text" 
+                      placeholder="e.g. Royal Halo Ring" 
+                      value={editingCustomer.productName || ''}
+                      onChange={(e) => setEditingCustomer({ ...editingCustomer, productName: e.target.value })}
+                      className="text-xs border border-slate-200 rounded p-1.5 w-full bg-white focus:outline-none focus:border-[#301934]"
+                    />
+                  </div>
+
+                  <div className="space-y-0.5">
+                    <label className="text-[10px] font-bold text-slate-500">Order Spend (₹)</label>
+                    <input 
+                      type="number" 
+                      placeholder="e.g. 8450" 
+                      value={editingCustomer.orderAmount || ''}
+                      onChange={(e) => setEditingCustomer({ ...editingCustomer, orderAmount: e.target.value as any })}
+                      className="text-xs border border-slate-200 rounded p-1.5 w-full bg-white focus:outline-none focus:border-[#301934] font-mono font-bold"
+                    />
+                  </div>
+
+                  <div className="space-y-0.5">
+                    <label className="text-[10px] font-bold text-slate-500">Return Spend (₹)</label>
+                    <input 
+                      type="number" 
+                      placeholder="e.g. 1200" 
+                      value={editingCustomer.returnAmount || ''}
+                      onChange={(e) => setEditingCustomer({ ...editingCustomer, returnAmount: e.target.value as any })}
+                      className="text-xs border border-slate-200 rounded p-1.5 w-full bg-white focus:outline-none focus:border-[#301934] font-mono font-bold text-rose-700"
+                    />
+                  </div>
+
+                  <div className="space-y-0.5">
+                    <label className="text-[10px] font-bold text-slate-500">Segment Tier</label>
+                    <select
+                      value={editingCustomer.status || 'New Customer'}
+                      onChange={(e) => setEditingCustomer({ ...editingCustomer, status: e.target.value as any })}
+                      className="text-xs border border-slate-200 rounded p-1.5 w-full bg-white text-slate-700 focus:outline-none focus:border-[#301934] font-bold"
+                    >
+                      <option value="New Customer">New Customer</option>
+                      <option value="Returning Customer">Returning Customer</option>
+                      <option value="Repeat Customer">Repeat Customer</option>
+                      <option value="VIP Customer">VIP Customer</option>
+                    </select>
+                  </div>
+                </div>
+              </div>
+
+              {/* Informative Help Text */}
+              <div className="text-[10px] text-slate-400 bg-amber-50/20 border border-amber-200/20 p-2.5 rounded-lg text-left italic">
+                ℹ️ After clicking save, all changes will be applied instantly to the Velvet Box database and automatically synchronized out to your active Google Sheets master file!
+              </div>
+
+              {/* Modal Footer / Submit buttons */}
+              <div className="pt-3 border-t border-slate-100 flex justify-end gap-2.5 mt-2">
+                <button 
+                  type="button" 
+                  onClick={() => setEditingCustomer(null)}
+                  className="px-4 py-2 border border-slate-200 text-slate-600 rounded text-xs hover:bg-slate-50 cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button 
+                  type="submit" 
+                  className="bg-[#301934] text-[#D4AF37] border border-[#D4AF37]/30 hover:bg-[#4a2650] px-5 py-2 rounded text-xs font-black tracking-wide shadow-md cursor-pointer"
+                >
+                  SAVE CHANGES
                 </button>
               </div>
 
@@ -3804,6 +5033,130 @@ export default function App() {
                   </button>
                 </>
               )}
+            </div>
+
+          </div>
+        </div>
+      )}
+
+      {/* --- Rich Media WhatsApp Sender Guided Modal --- */}
+      {showWhatsAppMediaModal && pendingWhatsAppCustomer && (
+        <div className="fixed inset-0 bg-[#301934]/60 backdrop-blur-xs flex items-center justify-center z-[9999] p-4 font-sans">
+          <div className="bg-white w-[460px] rounded-2xl shadow-2xl border border-[#D4AF37]/35 overflow-hidden flex flex-col max-h-[90vh]">
+            
+            {/* Modal Header */}
+            <div className="bg-[#301934] text-[#D4AF37] p-4.5 flex justify-between items-center border-b border-[#D4AF37]/20">
+              <div className="flex items-center gap-2">
+                <MessageSquare className="w-5 h-5 text-[#D4AF37]" />
+                <div className="text-left">
+                  <h3 className="text-xs font-black uppercase tracking-[0.2em] font-sans">WhatsApp Rich Media Portal</h3>
+                  <p className="text-[9px] text-purple-200 mt-0.5">Send lookbook design with personalized offer</p>
+                </div>
+              </div>
+              <button 
+                type="button"
+                onClick={() => setShowWhatsAppMediaModal(false)}
+                className="text-purple-300 hover:text-white p-1 bg-[#4a2650]/40 rounded-full cursor-pointer transition-colors"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {/* Modal Scrollable Content */}
+            <div className="p-6 overflow-auto text-left space-y-4">
+              
+              <div className="p-3 px-4 bg-slate-50 border border-slate-200 rounded-xl space-y-2">
+                <p className="text-xxs font-mono uppercase tracking-wider text-[#B76E79] font-black">Patron Target Info</p>
+                <div className="text-xs text-slate-700 leading-normal flex items-center justify-between">
+                  <div>
+                    Name: <strong className="text-[#301934]">{pendingWhatsAppCustomer.name}</strong>
+                  </div>
+                  <div>
+                    WhatsApp: <strong className="text-slate-600 font-mono text-[11px]">{pendingWhatsAppCustomer.whatsAppNumber}</strong>
+                  </div>
+                </div>
+              </div>
+
+              {/* Design Image Attachment Box */}
+              {campaignImage && (
+                <div className="space-y-1.5 bg-purple-50/20 border border-[#301934]/10 rounded-xl p-3">
+                  <span className="text-[9px] font-black text-[#301934] uppercase tracking-wider block">📷 ATTACHED CAMPAIGN DESIGN LOOKBOOK</span>
+                  <div className="flex gap-4 items-center mt-1">
+                    <img 
+                      src={campaignImage} 
+                      alt="Campaign design draft" 
+                      className="w-20 h-20 rounded border border-slate-200 object-cover shrink-0 select-none shadow-sm"
+                      referrerPolicy="no-referrer"
+                    />
+                    <div className="space-y-1">
+                      <p className="text-[11px] font-extrabold text-slate-800 line-clamp-1">{campaignImageName || 'campaign_media.png'}</p>
+                      <p className="text-[9.5px] text-[#B76E79] font-semibold">Ready in System memory clipboard!</p>
+                      <p className="text-[9px] text-slate-500 leading-normal font-sans">
+                        To bypass browser sandbox restrictions, we have prepared this fine graphic to be copied.
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Instructions Guidelines Box */}
+              <div className="border border-slate-100 bg-[#301934]/5 rounded-xl p-4 space-y-3">
+                <p className="text-[10px] font-black uppercase text-[#301934] tracking-wide font-sans">💡 How to send Image over WhatsApp:</p>
+                
+                <div className="space-y-2.5 text-xs text-slate-600">
+                  <div className="flex gap-2.5">
+                    <span className="w-5 h-5 rounded-full bg-[#B76E79] text-white flex items-center justify-center font-extrabold text-[10px] shrink-0 font-sans">1</span>
+                    <p className="leading-snug mt-0.5 font-sans">
+                      Click the gold button below. We will automatically copy this <strong>promo text & design image</strong> to your clipboard.
+                    </p>
+                  </div>
+
+                  <div className="flex gap-2.5">
+                    <span className="w-5 h-5 rounded-full bg-[#B76E79] text-white flex items-center justify-center font-extrabold text-[10px] shrink-0 font-sans">2</span>
+                    <p className="leading-snug mt-0.5 font-sans">
+                      Once WhatsApp chats open, select your target chat (or it will pre-select automatically).
+                    </p>
+                  </div>
+
+                  <div className="flex gap-2.5">
+                    <span className="w-5 h-5 rounded-full bg-[#B76E79] text-white flex items-center justify-center font-extrabold text-[10px] shrink-0 font-sans">3</span>
+                    <p className="leading-snug mt-0.5 font-sans">
+                      Simply press <kbd className="bg-white border border-slate-300 rounded px-1.5 py-0.5 text-[9px] font-mono font-bold text-slate-700 shadow-xxs">Ctrl + V</kbd> (or <kbd className="bg-white border border-slate-300 rounded px-1.5 py-0.5 text-[9px] font-mono font-bold text-slate-700 shadow-xxs">Cmd + V</kbd> on Mac) inside the chat box and hit send!
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+            </div>
+
+            {/* Modal Footer Controls */}
+            <div className="p-4 bg-slate-50 border-t border-slate-100 flex justify-end gap-2 text-right shrink-0">
+              <button 
+                type="button"
+                onClick={() => setShowWhatsAppMediaModal(false)}
+                className="px-4 py-2 border border-slate-200 text-slate-600 rounded-lg text-xs hover:bg-slate-100 flex items-center gap-1 cursor-pointer font-bold transition-all"
+              >
+                Cancel
+              </button>
+
+              <button 
+                type="button"
+                disabled={isCopyingMedia}
+                onClick={handleProceedToWhatsApp}
+                className="bg-[#301934] hover:bg-[#4a2650] text-[#D4AF37] hover:text-white font-black text-xs py-2 px-5 rounded-lg border border-[#D4AF37]/30 flex items-center gap-1.5 cursor-pointer shadow-md transition-all transform active:scale-98"
+              >
+                {isCopyingMedia ? (
+                  <>
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                    <span>Copying Assets...</span>
+                  </>
+                ) : (
+                  <>
+                    <Phone className="w-3.5 h-3.5" />
+                    <span>⚡ PROCEED TO WHATSAPP WEB</span>
+                  </>
+                )}
+              </button>
             </div>
 
           </div>

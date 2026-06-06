@@ -130,7 +130,8 @@ export const createNewCrmSpreadsheet = async (): Promise<{ id: string; url: stri
     "Total Revenue",
     "CLV",
     "Last Purchase Date",
-    "Relationship Status"
+    "Relationship Status",
+    "Return Amount"
   ];
 
   await writeSpreadsheetHeaders(id, 'Customer Directory', headers);
@@ -189,11 +190,12 @@ export const syncCustomersToSheets = async (sheetId: string, sheetName: string, 
     c.totalRevenue || 0,
     c.clv || 0,
     c.lastPurchaseDate || '',
-    c.status || 'New Customer'
+    c.status || 'New Customer',
+    c.returnAmount || 0
   ]);
 
   // Read range first, or clear down standard entries to ensure no hanging items
-  const rangeToClear = `${cleanSheetName}!A2:R1000`;
+  const rangeToClear = `${cleanSheetName}!A2:S1000`;
   await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/${encodeURIComponent(rangeToClear)}:clear`, {
     method: 'POST',
     headers: {
@@ -202,7 +204,7 @@ export const syncCustomersToSheets = async (sheetId: string, sheetName: string, 
   });
 
   // Write new customer list starting at A2
-  const rangeToWrite = `${cleanSheetName}!A2:R${values.length + 1}`;
+  const rangeToWrite = `${cleanSheetName}!A2:S${values.length + 1}`;
   const res = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/${encodeURIComponent(rangeToWrite)}?valueInputOption=USER_ENTERED`, {
     method: 'PUT',
     headers: {
@@ -266,7 +268,8 @@ export const importCustomersFromSheets = async (sheetId: string, sheetName: stri
       totalRevenue: parseFloat(r[14]) || 0,
       clv: parseFloat(r[15]) || 0,
       lastPurchaseDate: r[16] || '',
-      status: (r[17] || 'New Customer') as any
+      status: (r[17] || 'New Customer') as any,
+      returnAmount: parseFloat(r[18]) || 0
     };
   });
 };

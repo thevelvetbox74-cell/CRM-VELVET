@@ -24,6 +24,7 @@ export interface Customer {
   clv: number; // Customer Lifetime Value (total revenue)
   lastPurchaseDate: string; // YYYY-MM-DD
   status: CustomerStatus;
+  returnAmount: number;
 }
 
 export interface CRMSettings {
